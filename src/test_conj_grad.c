@@ -48,10 +48,13 @@ typedef struct {
 
 struct thread_data{
   int thread_id;
-  matrix_ptr a;
-  vector_ptr p;
-  vector_ptr Ad;
-  long int N;
+  int n;
+  matrix_ptr A;
+  vector_ptr x;
+  vector_ptr a;
+  vector_ptr b;
+  vector_ptr result;
+  float sum;
 };
 
 struct thread_data_dot{
@@ -82,7 +85,7 @@ int init_vector(vector_ptr v, long int row_len, float *data_ptr);
 int zero_vector(vector_ptr v, long int row_len);
 void print_vector(vector_ptr v);
 data_t *get_matrix_start(matrix_ptr m);
-void matrix_vector_mult_serial(matrix_ptr a, vector_ptr p, vector_ptr Ad, long int N);
+void mat_vec_mul_serial(int n, matrix_ptr A, vector_ptr x, vector_ptr result);
 void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr Ad, vector_ptr pnew0, vector_ptr p0, int N);
 // void mmm_kij(matrix_ptr a, matrix_ptr b, matrix_ptr c);
 // void mmm_jki(matrix_ptr a, matrix_ptr b, matrix_ptr c);
@@ -229,7 +232,7 @@ int main(int argc, char *argv[])
   vector_ptr pnew = new_vector(alloc_size);
   zero_vector(pnew, alloc_size);
 
-  matrix_vector_mult_serial(a0, p0, Ad, alloc_size);
+  mat_vec_mul_serial(alloc_size, a0, p0, Ad);
   // print_vector(Ad);
   
   data_t *r1 = get_vector_start(r0);
@@ -467,67 +470,109 @@ void print_vector(vector_ptr v) {
 
 /*************************************************/
 
-/* mmm */
-void matrix_vector_mult_serial(matrix_ptr a, vector_ptr p, vector_ptr Ad, long int N)
+/* mmm serial*/
+void mat_vec_mul_serial(int n, matrix_ptr A, vector_ptr x, vector_ptr result)
 {
-  long int i, j, k;
-  long int length = get_matrix_row_length(a);
-  data_t *a0 = get_matrix_start(a);
-  data_t *p0 = get_vector_start(p);
-  data_t *result = get_vector_start(Ad);
-  
-  // print_matrix(a);
+  int i, j;
 
-  for (long i = 0; i < N; i++) {
-      result[i] = 0;
-      for (long k = 0; k < N; k++) {
-          result[i] += a0[i * N + k] * p0[k];
-      }
+  data_t *A_ptr = get_matrix_start(A);
+  data_t *x_ptr = get_vector_start(x);
+  data_t *result_ptr = get_vector_start(result);
+  
+  for (i = 0; i < n; i++) {
+    data_t sum = 0.0;
+    for (j = 0; j < n; j++) {
+      sum += A_ptr[i * n + j] * x_ptr[j];
+    }
+    result_ptr[i] = sum;
   }
 }
 
-void *matrix_vector_mult_pthread(void *threadarg)
+void *mat_vec_mul_pthread_func(void *threadarg)
 {
-    long taskid;
     struct thread_data *my_data; 
-
     my_data = (struct thread_data *) threadarg;
-    taskid = my_data->thread_id;
-    printf("in thread function id is %d\n", taskid);
-    printf("\n");
-    pthread_exit(NULL);
+    int taskid = my_data->thread_id;
+    int n =  my_data->n;
+
+    data_t *A_ptr = get_matrix_start(my_data->A);
+    data_t *x_ptr = get_vector_start(my_data->x);
+    data_t *result_ptr = get_vector_start(my_data->result);
+
+    int rows_per_thread = n / NUM_THREADS;
+    int start_row, end_row;
+
+    start_row = taskid * (rows_per_thread);
+    end_row = start_row + rows_per_thread;
+
+    for (int i = start_row; i < end_row; i++) {
+        data_t sum = 0.0;
+        for (int j = 0; j < n; j++) {
+            sum += A_ptr[i * n + j] * x_ptr[j];
+        }
+        result_ptr[i] = sum;
+    }
+    pthread_exit(NULL); 
 }
 
+void mat_vec_mul_pthreads_create(int n, matrix_ptr A, vector_ptr x, vector_ptr result)
+{
+  pthread_t threads[NUM_THREADS];
+  struct thread_data thread_data_array[NUM_THREADS];
+  int rc;
 
-float dot(vector_ptr a, vector_ptr b, int n) {
+  for (long t = 0; t < NUM_THREADS; t++)
+  {
+    thread_data_array[t].thread_id = t;
+    thread_data_array[t].n = n;
+    thread_data_array[t].A = A;
+    thread_data_array[t].x = x;
+    thread_data_array[t].result = result;
+    rc = pthread_create(&threads[t], NULL, mat_vec_mul_pthread_func,
+                                                (void*) &thread_data_array[t]);
+    if (rc) {
+      printf("ERROR; return code from pthread_create() is %d\n", rc);
+      exit(-1);
+    }
+  }
+
+  for (long t = 0; t < NUM_THREADS; t++) {
+    if (pthread_join(threads[t], NULL)) {
+      exit(19);
+    }
+  }
+}
+
+/*************************************************/
+float dot_serial(int n, vector_ptr a, vector_ptr b) {
     float sum = 0.0;
-    data_t *a0 = get_vector_start(a);
-    data_t *b0 = get_vector_start(b);
+    data_t *a_ptr = get_vector_start(a);
+    data_t *b_ptr = get_vector_start(b);
     for (int i = 0; i < n; i++) {
-        sum += a0[i] * b0[i];
+        sum += a_ptr[i] * b_ptr[i];
     }
     return sum;
 }
 
-void *dot_pthreads(void *threadarg) {
-    long taskid;
-    struct thread_data_dot *my_data; 
-
-    my_data = (struct thread_data_dot *) threadarg;
-    taskid = my_data->thread_id;
-
-    int n = my_data->num_elements_per_thread;
-    int offset = my_data->start;
- 
-    // printf("int n is %d\n", n);
-    // printf("offset is %d\n", offset);
+void *dot_product_pthread_func(void *threadarg) {
+    
+    struct thread_data *my_data; 
+    my_data = (struct thread_data *) threadarg;
+    int taskid = my_data->thread_id;
+    int n = my_data->n;
+  
     float sum = 0.0;
-    data_t *a0 = get_vector_start(my_data->a);
-    data_t *b0 = get_vector_start(my_data->b);
+    data_t *a_ptr = get_vector_start(my_data->a);
+    data_t *b_ptr = get_vector_start(my_data->b);
 
-    for (int i = 0; i < n; i++) {
-        sum += a0[i+offset] * b0[i+offset];
-        // printf("sum is %f\n", sum);
+    int rows_per_thread = n / NUM_THREADS;
+    int start_row, end_row;
+
+    start_row = taskid * (rows_per_thread);
+    end_row = start_row + rows_per_thread;
+
+    for (int i = start_row; i < end_row; i++) {
+        sum += a_ptr[i] * b_ptr[i];
     }
 
     my_data->sum = sum;
@@ -535,29 +580,26 @@ void *dot_pthreads(void *threadarg) {
     pthread_exit(NULL);
 }
 
-float dot_thread_create(vector_ptr a, vector_ptr b, int n)
+float dot_product_pthread_create(int n, vector_ptr a, vector_ptr b)
 {
   pthread_t threads[NUM_THREADS];
-  struct thread_data_dot thread_data_array[NUM_THREADS];
+  struct thread_data thread_data_array[NUM_THREADS];
   int rc;
-  float sum = 0.0;
-  int num_elements_per_thread = n / NUM_THREADS; 
-  int s = 0;
+
   for (long t = 0; t < NUM_THREADS; t++)
   {
     thread_data_array[t].thread_id = t;
-    thread_data_array[t].start = s;
-    thread_data_array[t].end = s + num_elements_per_thread;
-    thread_data_array[t].num_elements_per_thread = num_elements_per_thread;
+    thread_data_array[t].n = n;
     thread_data_array[t].a = a;
     thread_data_array[t].b = b;
-    rc = pthread_create(&threads[t], NULL, dot_pthreads,
+    thread_data_array[t].sum = 0.0;
+    rc = pthread_create(&threads[t], NULL, dot_product_pthread_func,
                                             (void*) &thread_data_array[t]);
     if (rc) {
       printf("ERROR; return code from pthread_create() is %d\n", rc);
       exit(-1);
     }
-    s += num_elements_per_thread;
+   
   }
       
   for (long t = 0; t < NUM_THREADS; t++) {
@@ -566,6 +608,7 @@ float dot_thread_create(vector_ptr a, vector_ptr b, int n)
     }
   }
 
+  float sum = 0.0;
   for (long t = 0; t < NUM_THREADS; t++)
   {
     sum += thread_data_array[t].sum;
@@ -574,6 +617,8 @@ float dot_thread_create(vector_ptr a, vector_ptr b, int n)
   return sum;
 
 }
+
+/*************************************************/
 
 void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr Ad, vector_ptr pnew0, vector_ptr p0, int N)
 {
@@ -595,7 +640,7 @@ void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr 
   while  (it < max_it)
   {
     // float rr = dot(r0,r0, N);
-    float rr = dot_thread_create(r0, r0, N);
+    float rr = dot_product_pthread_create(N, r0, r0);
     // exit(1);
     // printf("rr is %f\n", rr);
     // exit(1);
@@ -610,7 +655,7 @@ void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr 
     {
       thread_data_array[t].thread_id = t;
 
-      rc = pthread_create(&threads[t], NULL, matrix_vector_mult_pthread,
+      rc = pthread_create(&threads[t], NULL, mat_vec_mul_pthreads,
                                               (void*) &thread_data_array[t]);
       if (rc) {
         printf("ERROR; return code from pthread_create() is %d\n", rc);
@@ -625,12 +670,12 @@ void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr 
       }
     }
        */
-    matrix_vector_mult_serial(a0, d0, Ad, N);
-
+    // mat_vec_mul_serial(N, a0, d0, Ad);
+    mat_vec_mul_pthreads_create(N, a0, d0, Ad);
 
   
     // print_vector(Ad);
-    float alpha = rr / dot(d0, Ad, N);
+    float alpha = rr / dot_product_pthread_create(N, d0, Ad);
     // print_matrix(a0);
     // print_vector(d0);
   
@@ -644,7 +689,7 @@ void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr 
     // print_vector(pnew0);
     // print_vector(r0);
    
-    float beta = dot(r0, r0, N) / rr;
+    float beta = dot_product_pthread_create(N, r0, r0) / rr;
     // printf("beta is %f\n", beta);
     
     for (int i = 0; i < N; i++) {
