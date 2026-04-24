@@ -7,10 +7,11 @@
 #include <time.h>
 #include <math.h>
 #include <pthread.h>
+#include <omp.h>
 
 #include "vector.h"
+#include "config.h"
 
-#define NUM_THREADS 2
 
 typedef float data_t;
 
@@ -25,5 +26,5 @@ struct copy_arg {
 
 void vec_copy_serial(int n, vector_ptr x, vector_ptr y);
 void vec_copy_pthreads(int n, vector_ptr x, vector_ptr y);
-
+void vec_copy_omp(int n, vector_ptr x, vector_ptr y);
 #endif

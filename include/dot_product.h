@@ -7,10 +7,11 @@
 #include <time.h>
 #include <math.h>
 #include <pthread.h>
+#include <omp.h>
 
 #include "vector.h"
+#include "config.h"
 
-#define NUM_THREADS 2
 
 typedef float data_t;
 
@@ -25,5 +26,5 @@ struct d_thread_data{
 
 float dot_serial(int n, vector_ptr a, vector_ptr b);
 float dot_product_pthread_create(int n, vector_ptr a, vector_ptr b);
-
+float dot_product_omp(int n, vector_ptr a, vector_ptr b);
 #endif

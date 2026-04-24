@@ -9,7 +9,6 @@
 #include <math.h>
 
 
-#define NUM_THREADS 2
 
 typedef float data_t;
 
