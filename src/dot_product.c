@@ -75,3 +75,15 @@ float dot_product_pthread_create(int n, vector_ptr a, vector_ptr b)
   return sum;
 
 }
+  
+float dot_product_omp(int n, vector_ptr a, vector_ptr b) {
+    float sum = 0.0;
+    data_t *a_ptr = get_vector_start(a);
+    data_t *b_ptr = get_vector_start(b);
+
+#pragma omp parallel for reduction(+:sum)    
+    for (int i = 0; i < n; i++) {
+        sum += a_ptr[i] * b_ptr[i];
+    }
+    return (float )sum;
+}

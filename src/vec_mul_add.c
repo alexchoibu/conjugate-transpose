@@ -55,3 +55,19 @@ void vec_mul_add_pthreads_create(int n, data_t c, vector_ptr x, vector_ptr y, ve
     }
   }
 }
+
+
+void vec_mul_add_openmp(int n, data_t c, vector_ptr x, vector_ptr y, vector_ptr result)
+{
+
+    data_t *x_ptr = get_vector_start(x);
+    data_t *y_ptr = get_vector_start(y);
+    data_t *result_ptr = get_vector_start(result);
+
+
+#pragma omp parallel for
+    for (int i = 0; i < n; i++) {   
+      result_ptr[i] = c * x_ptr[i] + y_ptr[i];
+    }
+   
+}

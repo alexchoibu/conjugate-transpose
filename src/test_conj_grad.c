@@ -7,6 +7,7 @@
 #include <time.h>
 #include <math.h>
 #include <pthread.h>
+#include <omp.h>
 
 #include "dot_product.h"
 #include "mat_vec_mult.h"
@@ -25,59 +26,18 @@
 // #define C   916  /* constant term */
 
 #define NUM_TESTS 1   /* Number of different sizes to test */
-#define NUM_THREADS 2
-#define OPTIONS 1
-#define IDENT 0
-/*
-long int alloc_size = 2;
-float a0_data[] = {4, 1, 1, 3};
-float b0_data[] = {1,2};
-int row_a = 2;
-int col_a = 2;
-*/
-typedef float data_t;
+#define OPTIONS 3
 
-
-long int alloc_size = 4;
-
-
-
-
-/* Create abstract data type for matrix */
-/*
-typedef struct {
-  long int len;
-  data_t *data;
-} matrix_rec, *matrix_ptr;
-
-typedef struct {
-  long int len;
-  data_t *data;
-} vector_rec, *vector_ptr;
-
-struct thread_data{
-  int thread_id;
-  int n;
-  matrix_ptr A;
-  vector_ptr x;
-  vector_ptr y;
-  vector_ptr a;
-  vector_ptr b;
-  data_t c;
-  vector_ptr result;
-  float sum;
-};
-
-*/
-
+long int alloc_size = 512;
 
 
 /* Prototypes */
 int clock_gettime(clockid_t clk_id, struct timespec *tp);
 void check_answers(matrix_ptr a0, vector_ptr p0, vector_ptr b0, int N);
-void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr Ad, vector_ptr pnew0, vector_ptr p0, int N);
+void conjugate_gradient_serial(int n, matrix_ptr A, vector_ptr b, vector_ptr x);
 void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr x);
 void init_rand(matrix_ptr A, vector_ptr b, long int row_len);
+
 /* -=-=-=-=- Time measurement by clock_gettime() -=-=-=-=- */
 /*
   As described in the clock_gettime manpage (type "man clock_gettime" at the
@@ -166,9 +126,121 @@ void check_answers(matrix_ptr a0, vector_ptr p0, vector_ptr b0, int N)
   }
 }
 
+/*************************************************/
+/*
+ * Inputs:
+ *   n - dimension of the system (A is n x n, b and x are length n)
+ *   A - matrix A
+ *   b - right-hand-side vector b
+ *   x - output: the solution vector x (written in place)
+ *
+ * Termination: loop exits when the residual L2 norm drops below 1e-10
+ * or after max_it = 100 iterations, whichever comes first.
+ *
+ * Implementation notes (no optimizations applied):
+ *   - All work runs on a single thread; no parallelism.
+ *   - Matrix-vector product and dot products are delegated to serial
+ *     kernels (mat_vec_mul_serial, dot_serial).
+*/
+void conjugate_gradient_serial(int n, matrix_ptr A, vector_ptr b, vector_ptr x)
+{
+
+  data_t rsold, rsnew, alpha, beta;
+  
+  int it = 0;
+  int converged = 0;
+  int max_it = 100;
+  float tolerance = 1e-10;
+
+  vector_ptr r = new_vector(n);
+  zero_vector(r, n);
+
+  vector_ptr p = new_vector(n);
+  zero_vector(p, n);
+
+  vector_ptr Ap = new_vector(n);
+  zero_vector(Ap, n);
+
+  data_t *x_ptr  = get_vector_start(x);
+  data_t *r_ptr  = get_vector_start(r);
+  data_t *p_ptr  = get_vector_start(p);
+  data_t *Ap_ptr = get_vector_start(Ap);
+  data_t *b_ptr  = get_vector_start(b);
+
+  for (int i = 0; i < n; i++) {
+    // Need to use following if x != 0:
+    // double Ax0 = 0;
+    // for (int j = 0; j < n; j++) Ax0 += A[i][j] * x[j];
+    // r[i] = b[i] - Ax0;
+    r_ptr[i] = b_ptr[i];
+    p_ptr[i] = r_ptr[i]; // Initial search direction is the residual
+  }
+  
+  rsold = dot_serial(n, r, r);
+
+  while  (it < max_it)
+  {
+
+    // Compute Ap = A * p
+    mat_vec_mul_serial(n, A, p, Ap);
+
+    // alpha = rsold / (p' * A * p)
+    alpha = rsold / dot_serial(n, p, Ap);
+
+    // Update x and r
+    for (int j = 0; j < n; j++) {
+        x_ptr[j] = x_ptr[j] + alpha * p_ptr[j];
+        r_ptr[j] = r_ptr[j] - alpha * Ap_ptr[j];
+    }
+
+    rsnew = dot_serial(n, r, r);
+
+    if (sqrt(rsnew) < tolerance)
+    {
+      converged = 1;
+      break;
+    }
+
+    // beta = rsnew / rsold
+    beta = rsnew / rsold;
+    // float rr = dot(r0,r0, N);
+    for (int j = 0; j < n; j++) p_ptr[j] = r_ptr[j] + beta * p_ptr[j];
+
+    rsold = rsnew;
+     it++;
+
+  }
+
+  
+  if (converged) {
+    printf("Converged after %d iterations\n", it);
+  } else {
+      printf("Did not converge within %d iterations\n", max_it);
+  }
+
+  // printf("CG solution: [%.10f, %.10f, %.10f, %.10f]\n", p[0], p[1], p[2], p[3]);
+  // printf("CG Solution: \n");
+  // print_vector(x);
+}
 
 
 /*************************************************/
+/*
+ * Inputs:
+ *   n  - dimension of the system (A is n x n, b and x are length n)
+ *   Ad - matrix A
+ *   bd - right-hand-side vector b
+ *   xd - output: the solution vector x (written in place)
+ *
+ * Termination: loop exits when the residual L2 norm drops below 1e-10
+ * or after max_it = 100 iterations, whichever comes first.
+ *
+ * Parallelization:
+ *   Each of the vector/matrix kernels (dot product, matvec, AXPY, copy)
+ *   spawns NUM_THREADS pthreads internally, partitions the work across
+ *   disjoint index ranges, and joins before returning. The CG loop itself
+ *   runs serially on the main thread; parallelism is inside each kernel.
+*/
 void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr xd)
 {
   int it = 0;
@@ -176,8 +248,8 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
   int max_it = 100;
   float tolerance = 1e-10;
 
-  print_matrix(Ad);
-  print_vector(bd);
+  // print_matrix(Ad);
+  // print_vector(bd);
 
   vector_ptr rd = new_vector(n);
   zero_vector(rd, n);
@@ -197,12 +269,11 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
   // p = r (initial search direction)
   vec_copy_pthreads(n, rd, pd);
 
+  // rsold = r · r
   rsold = dot_product_pthread_create(n, rd, rd);
+
   while  (it < max_it)
-  {
-    // rsold = r · r
-    printf("rsold is %f\n", rsold);
-  
+  { 
     // Compute Ap = A * p
     mat_vec_mul_pthreads_create(n, Ad, pd, Apd);
 
@@ -210,8 +281,6 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
     pAp = dot_product_pthread_create(n, pd, Apd);
 
     alpha = rsold / pAp;
-
-    printf("alpha is %f\n", alpha);
 
     // x = x + alpha * p
     vec_mul_add_pthreads_create(n, alpha, pd, xd, xd);  
@@ -244,7 +313,6 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
 
     it++;
 
-    printf("\n");
   }
 
   if (converged) {
@@ -253,11 +321,92 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
       printf("Did not converge within %d iterations\n", max_it);
   }
 
-  print_vector(xd);
+  // print_vector(xd);
 
 }
 
+void conjugate_gradient_openMP(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr xd)
+{
+  int it = 0;
+  int converged = 0;
+  int max_it = 100;
+  float tolerance = 1e-10;
 
+  // print_matrix(Ad);
+  // print_vector(bd);
+
+  vector_ptr rd = new_vector(n);
+  zero_vector(rd, n);
+
+  vector_ptr pd = new_vector(n);
+  zero_vector(pd, n);
+
+  vector_ptr Apd = new_vector(n);
+  zero_vector(Apd, n);
+
+  data_t rsold, rsnew, pAp, alpha;
+
+  // Initial r = b - Ax (assuming initial x is zeros)
+  // r = b
+  vec_copy_omp(n, bd, rd);
+
+  // p = r (initial search direction)
+  vec_copy_omp(n, rd, pd);
+
+  // rsold = r · r
+  rsold = dot_product_omp(n, rd, rd);
+
+
+  while  (it < max_it)
+  { 
+    // Compute Ap = A * p
+    mat_vec_mul_openmp(n, Ad, pd, Apd);
+
+    // alpha = rsold / (p · Ap)
+    pAp = dot_product_omp(n, pd, Apd);
+
+    alpha = rsold / pAp;
+
+    // x = x + alpha * p
+    vec_mul_add_openmp(n, alpha, pd, xd, xd);  
+   
+    // print_vector(xd);
+
+    // r = r - alpha * Ap
+    vec_mul_add_openmp(n, -alpha, Apd, rd, rd);  
+
+    // print_vector(rd);
+
+    // rsnew = r · r
+    rsnew = dot_product_omp(n, rd, rd);
+
+    // Check convergence
+    if (sqrt(rsnew) < tolerance)
+    {
+      converged = 1;
+      break;
+    }
+
+    // beta = rsnew / rsold
+    data_t beta = rsnew / rsold;
+
+    // p = r + beta * p
+    vec_mul_add_openmp(n, beta, pd, rd, pd);  
+
+
+    rsold = rsnew;
+
+    it++;
+  }
+
+  if (converged) {
+    printf("Converged after %d iterations\n", it);
+  } else {
+      printf("Did not converge within %d iterations\n", max_it);
+  }
+
+  // print_vector(xd);
+}
 /*****************************************************************************/
 int main(int argc, char *argv[])
 {
@@ -266,11 +415,12 @@ int main(int argc, char *argv[])
   double time_stamp[OPTIONS][NUM_TESTS];
   double wakeup_answer;
   //long int x, n;
-
-
-  //x = NUM_TESTS-1;
+  omp_set_num_threads(4);
+  int z;
+  z = NUM_TESTS-1;
   
   wakeup_answer = wakeup_delay();
+
 
   matrix_ptr A = new_matrix(alloc_size);
   vector_ptr b = new_vector(alloc_size);
@@ -279,94 +429,53 @@ int main(int argc, char *argv[])
   vector_ptr x = new_vector(alloc_size);
   zero_vector(x, alloc_size);
 
-  conjugate_gradient_pthread(alloc_size, A, b, x);
+  // conjugate_gradient_pthread(alloc_size, A, b, x);
+  // conjugate_gradient_serial(alloc_size, A, b, x);
+ // conjugate_gradient_openMP(alloc_size, A, b, x);
 
+   OPTION = 0;
 
-  exit(1);
+  // for (x=0; x<NUM_TESTS && (n = A*x*x + B*x + C, n<=alloc_size); x++) {
+    // printf(" OPT %d, iter %ld, size %ld\n", OPTION, x, n);
+    printf("Testing Conjugate Gradient Serial, size %d\n", alloc_size);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
+    conjugate_gradient_serial(alloc_size, A, b, x);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
+    time_stamp[OPTION][z] = interval(time_start, time_stop);
+  // }
+  printf("\n");
+  zero_vector(x, alloc_size);
+  OPTION++;
+  // for (x=0; x<NUM_TESTS && (n = A*x*x + B*x + C, n<=alloc_size); x++) {
+  //   printf(" OPT %d, iter %ld, size %ld\n", OPTION, x, n);
+    printf("Testing Conjugate Gradient Pthread, size %d\n", alloc_size);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
+    conjugate_gradient_pthread(alloc_size, A, b, x);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
+    time_stamp[OPTION][z] = interval(time_start, time_stop);
+  // }
 
-
-
-
-  // float *a0_data_ptr = a0_data;
-  /* declare and initialize the matrix structure */
-  
-  // init_matrix(a0, alloc_size, a0_data_ptr);
-
-  /*
-  
-  // float *b0_data_ptr = b0_data;
-  vector_ptr b0 = new_vector(alloc_size);
-  // init_vector(b0, alloc_size, b0_data_ptr);
-
-  init_rand(A, b0, alloc_size);
-
-  // print_matrix(a0);
-  // printf("\n");
-  // print_vector(b0);
-
-  
-  // exit(1);
-
-  // printf("\n");
-  // print_vector(p0);
-  
-  
-  vector_ptr Ap = new_vector(alloc_size);
-  zero_vector(Ap, alloc_size);
-
-  
-
-  vector_ptr d0 = new_vector(alloc_size);
-  zero_vector(d0, alloc_size);
-  
-  vector_ptr pnew = new_vector(alloc_size);
-  zero_vector(pnew, alloc_size);
-
-  //Compute Ap = A * p
-  mat_vec_mul_serial(alloc_size, A, p, Ap);
-  // print_vector(Ad);
-  
-  data_t *r1 = get_vector_start(r0);
-  data_t *b1 = get_vector_start(b0);
-  data_t *Ad1 = get_vector_start(Ad);
-  data_t *d1 = get_vector_start(d0);
-
-  for (int i = 0; i < alloc_size; i++) {
-        r1[i] = b1[i] - Ad1[i];
-        d1[i] = r1[i];
+  printf("\n");
+  zero_vector(x, alloc_size);
+  OPTION++;
+  if (OPTIONS > 2) {
+    // for (x=0; x<NUM_TESTS && (n = A*x*x + B*x + C, n<=alloc_size); x++) {
+    //   printf(" OPT %d, iter %ld, size %ld\n", OPTION, x, n);
+      printf("Testing Conjugate Gradient OpenMP, size %d\n", alloc_size);
+      clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
+      conjugate_gradient_openMP(alloc_size, A, b, x);
+      clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
+      time_stamp[OPTION][z] = interval(time_start, time_stop);
+    // }
   }
 
-  exit(1);
-  // print_vector(r0);
- 
-  
-//   matrix_ptr c0 = new_matrix(alloc_size);
-//   zero_matrix(c0, alloc_size);
-
-  OPTION = 0;
-  x = 0;
-//   for (x=0; x<NUM_TESTS && (n = A*x*x + B*x + C, n<=alloc_size); x++) {
-    // printf(" OPT %d, iter %ld, size %ld\n", OPTION, x, n);
-    // set_matrix_row_length(a0, n);
-    // set_matrix_row_length(b0, n);
-    // set_matrix_row_length(c0, n);
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
-    conjugate_gradient(r0, a0, d0, Ad, pnew, p0, alloc_size);
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
-    time_stamp[OPTION][x] = interval(time_start, time_stop);
-//   }
-
-  // After CG finishes, p holds the solution
- // After CG finishes, p holds the solution
-  check_answers(a0, p0, b0, alloc_size);
   printf("Done collecting measurements.\n\n");
 
-  printf("row_len, conj origonal\n");
+  printf("row_len, Serial, Pthread, OpenMP\n");
   {
     int i, j;
     for (i = 0; i < NUM_TESTS; i++) {
-   //   printf("%ld, ", A*i*i + B*i + C);
-      printf("%ld, ", alloc_size);
+      printf("%d, ", alloc_size);
       for (j = 0; j < OPTIONS; j++) {
         if (j != 0) {
           printf(", ");
@@ -377,8 +486,10 @@ int main(int argc, char *argv[])
     }
   }
   printf("\n");
-*/
-//   printf("Wakeup delay computed: %g \n", wakeup_answer);
+
+  printf("Wakeup delay computed: %g \n", wakeup_answer);
+
+
 } /* end main */
 
 /**********************************************/
@@ -416,97 +527,3 @@ void init_rand(matrix_ptr A, vector_ptr b, long int row_len)
 
 
 
-/*************************************************/
-
-// void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr Ad, vector_ptr pnew0, vector_ptr p0, int N)
-// {
-
-//   pthread_t threads[NUM_THREADS];
-//   struct thread_data thread_data_array[NUM_THREADS];
-//   int rc;
-//   int it = 0;
-//   int converged = 0;
-//   int max_it = 100;
-//   float tolerance = 1e-10;
-//   data_t *r = get_vector_start(r0);
-//   data_t *pnew = get_vector_start(pnew0);
-//   data_t *d = get_vector_start(d0);
-//   data_t *p = get_vector_start(p0);
-//   data_t *Ad_p  = get_vector_start(Ad);
-//   printf("in conjugate grad function\n");
-  
-//   while  (it < max_it)
-//   {
-//     // float rr = dot(r0,r0, N);
-//     float rr = dot_product_pthread_create(N, r0, r0);
-//     // exit(1);
-//     // printf("rr is %f\n", rr);
-//     // exit(1);
-
-//     // if (it == 1) exit(1);
-//     /*
-//     for (long t = 0; t < NUM_THREADS; t++)
-//     {
-//       thread_data_array[t].thread_id = t;
-
-//       rc = pthread_create(&threads[t], NULL, mat_vec_mul_pthreads,
-//                                               (void*) &thread_data_array[t]);
-//       if (rc) {
-//         printf("ERROR; return code from pthread_create() is %d\n", rc);
-//         exit(-1);
-//       }
-//     }
-   
-    
-//     for (long t = 0; t < NUM_THREADS; t++) {
-//       if (pthread_join(threads[t], NULL)) {
-//         exit(19);
-//       }
-//     }
-//        */
-//     // mat_vec_mul_serial(N, a0, d0, Ad);
-//     mat_vec_mul_pthreads_create(N, a0, d0, Ad);
-
-  
-//     // print_vector(Ad);
-//     float alpha = rr / dot_product_pthread_create(N, d0, Ad);
-//     // print_matrix(a0);
-//     // print_vector(d0);
-  
-//     // printf("alpha = %f %f\n", alpha, dot(d0, Ad, N));
-  
-   
-//     for (int i = 0; i < N; i++) {
-//       pnew[i] = p[i] + alpha * d[i];
-//       r[i]    = r[i] - alpha * Ad_p[i];
-//     }
-//     // print_vector(pnew0);
-//     // print_vector(r0);
-   
-//     float beta = dot_product_pthread_create(N, r0, r0) / rr;
-//     // printf("beta is %f\n", beta);
-    
-//     for (int i = 0; i < N; i++) {
-//         d[i] = r[i] + beta * d[i];
-//     }
-//     // print_vector(d0);
-  
-//     for (int i = 0; i < N; i++) {
-//       p[i] = pnew[i];
-//     }
-//     // print_vector(p0);
-
-//     it++;
-//   }
-
-  
-//   if (converged) {
-//     printf("Converged after %d iterations\n", it);
-//   } else {
-//       printf("Did not converge within %d iterations\n", max_it);
-//   }
-
-//   // printf("CG solution: [%.10f, %.10f, %.10f, %.10f]\n", p[0], p[1], p[2], p[3]);
-//   // printf("CG Solution: \n");
-//   // print_vector(p0);
-// }

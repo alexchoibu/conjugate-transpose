@@ -59,3 +59,17 @@ void vec_copy_pthreads(int n, vector_ptr x, vector_ptr y)
     }
   }
 }
+
+void vec_copy_omp(int n, vector_ptr x, vector_ptr y)
+{
+  data_t *x_ptr = get_vector_start(x);
+  data_t *y_ptr = get_vector_start(y);
+
+#pragma omp parallel for
+  for (int i = 0; i < n; i++) {
+    // int tid = omp_get_thread_num();
+    // printf("Thread %d handling i=%d\n", tid, i);
+    y_ptr[i] = x_ptr[i];
+  }
+  
+}

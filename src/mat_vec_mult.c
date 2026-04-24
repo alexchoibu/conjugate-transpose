@@ -72,3 +72,21 @@ void mat_vec_mul_pthreads_create(int n, matrix_ptr A, vector_ptr x, vector_ptr r
     }
   }
 }
+
+void mat_vec_mul_openmp(int n, matrix_ptr A, vector_ptr x, vector_ptr result)
+{
+  int i, j;
+
+  data_t *A_ptr = get_matrix_start(A);
+  data_t *x_ptr = get_vector_start(x);
+  data_t *result_ptr = get_vector_start(result);
+
+#pragma omp parallel for
+  for (i = 0; i < n; i++) {
+    data_t sum = 0.0;
+    for (j = 0; j < n; j++) {
+      sum += A_ptr[i * n + j] * x_ptr[j];
+    }
+    result_ptr[i] = (data_t) sum;
+  }
+}
