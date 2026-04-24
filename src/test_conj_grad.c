@@ -1,5 +1,5 @@
 /*****************************************************************************/
-// gcc -pthread -O1 test_conj_grad.c -lrt -lm -o test_conj_grad
+// gcc -pthread -O1 test_conj_grad.c dot_product.c -lrt -lm -o test_conj_grad
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +7,14 @@
 #include <time.h>
 #include <math.h>
 #include <pthread.h>
+
+#include "dot_product.h"
+#include "mat_vec_mult.h"
+#include "matrix.h"
+#include "vec_copy.h"
+#include "vec_mul_add.h"
+#include "vector.h"
+
 #define CPNS 2.0    /* Cycles per nanosecond -- Adjust to your computer,
                        for example a 3.2 GhZ GPU, this would be 3.2 */
 
@@ -17,7 +25,7 @@
 // #define C   916  /* constant term */
 
 #define NUM_TESTS 1   /* Number of different sizes to test */
-#define NUM_THREADS 8
+#define NUM_THREADS 2
 #define OPTIONS 1
 #define IDENT 0
 /*
@@ -30,12 +38,13 @@ int col_a = 2;
 typedef float data_t;
 
 
-long int alloc_size = 512;
+long int alloc_size = 4;
 
 
 
 
 /* Create abstract data type for matrix */
+/*
 typedef struct {
   long int len;
   data_t *data;
@@ -51,45 +60,24 @@ struct thread_data{
   int n;
   matrix_ptr A;
   vector_ptr x;
+  vector_ptr y;
   vector_ptr a;
   vector_ptr b;
+  data_t c;
   vector_ptr result;
   float sum;
 };
 
-struct thread_data_dot{
-  int thread_id;
-  vector_ptr a;
-  vector_ptr b;
-  int start;
-  int end;
-  int num_elements_per_thread;
-  float sum;
-};
+*/
+
 
 
 /* Prototypes */
 int clock_gettime(clockid_t clk_id, struct timespec *tp);
-data_t *get_vector_start(vector_ptr v);
-matrix_ptr new_matrix(long int row_len);
-int set_matrix_row_length(matrix_ptr m, long int row_len);
-long int get_matrix_row_length(matrix_ptr m);
-int init_matrix(matrix_ptr m, long int row_len, float *data_ptr);
-int zero_matrix(matrix_ptr m, long int row_len);
-void init_rand(matrix_ptr A, vector_ptr b, long int row_len);
-
-vector_ptr new_vector(long int row_len);
-int set_vector_row_length(vector_ptr v, long int row_len);
-long int get_vector_row_length(vector_ptr v);
-int init_vector(vector_ptr v, long int row_len, float *data_ptr);
-int zero_vector(vector_ptr v, long int row_len);
-void print_vector(vector_ptr v);
-data_t *get_matrix_start(matrix_ptr m);
-void mat_vec_mul_serial(int n, matrix_ptr A, vector_ptr x, vector_ptr result);
+void check_answers(matrix_ptr a0, vector_ptr p0, vector_ptr b0, int N);
 void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr Ad, vector_ptr pnew0, vector_ptr p0, int N);
-// void mmm_kij(matrix_ptr a, matrix_ptr b, matrix_ptr c);
-// void mmm_jki(matrix_ptr a, matrix_ptr b, matrix_ptr c);
-void print_matrix(matrix_ptr m);
+void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr x);
+void init_rand(matrix_ptr A, vector_ptr b, long int row_len);
 /* -=-=-=-=- Time measurement by clock_gettime() -=-=-=-=- */
 /*
   As described in the clock_gettime manpage (type "man clock_gettime" at the
@@ -178,6 +166,98 @@ void check_answers(matrix_ptr a0, vector_ptr p0, vector_ptr b0, int N)
   }
 }
 
+
+
+/*************************************************/
+void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr xd)
+{
+  int it = 0;
+  int converged = 0;
+  int max_it = 100;
+  float tolerance = 1e-10;
+
+  print_matrix(Ad);
+  print_vector(bd);
+
+  vector_ptr rd = new_vector(n);
+  zero_vector(rd, n);
+
+  vector_ptr pd = new_vector(n);
+  zero_vector(pd, n);
+
+  vector_ptr Apd = new_vector(n);
+  zero_vector(Apd, n);
+
+  data_t rsold, rsnew, pAp, alpha;
+
+  // Initial r = b - Ax (assuming initial x is zeros)
+  // r = b
+  vec_copy_pthreads(n, bd, rd);
+
+  // p = r (initial search direction)
+  vec_copy_pthreads(n, rd, pd);
+
+  rsold = dot_product_pthread_create(n, rd, rd);
+  while  (it < max_it)
+  {
+    // rsold = r · r
+    printf("rsold is %f\n", rsold);
+  
+    // Compute Ap = A * p
+    mat_vec_mul_pthreads_create(n, Ad, pd, Apd);
+
+    // alpha = rsold / (p · Ap)
+    pAp = dot_product_pthread_create(n, pd, Apd);
+
+    alpha = rsold / pAp;
+
+    printf("alpha is %f\n", alpha);
+
+    // x = x + alpha * p
+    vec_mul_add_pthreads_create(n, alpha, pd, xd, xd);  
+   
+    // print_vector(xd);
+
+    // r = r - alpha * Ap
+    vec_mul_add_pthreads_create(n, -alpha, Apd, rd, rd);  
+
+    // print_vector(rd);
+
+    // rsnew = r · r
+    rsnew = dot_product_pthread_create(n, rd, rd);
+
+    // Check convergence
+    if (sqrt(rsnew) < tolerance)
+    {
+      converged = 1;
+      break;
+    }
+
+    // beta = rsnew / rsold
+    data_t beta = rsnew / rsold;
+
+    // p = r + beta * p
+    vec_mul_add_pthreads_create(n, beta, pd, rd, pd);  
+
+
+    rsold = rsnew;
+
+    it++;
+
+    printf("\n");
+  }
+
+  if (converged) {
+    printf("Converged after %d iterations\n", it);
+  } else {
+      printf("Did not converge within %d iterations\n", max_it);
+  }
+
+  print_vector(xd);
+
+}
+
+
 /*****************************************************************************/
 int main(int argc, char *argv[])
 {
@@ -185,28 +265,40 @@ int main(int argc, char *argv[])
   struct timespec time_start, time_stop;
   double time_stamp[OPTIONS][NUM_TESTS];
   double wakeup_answer;
-  long int x, n;
+  //long int x, n;
 
 
-  x = NUM_TESTS-1;
+  //x = NUM_TESTS-1;
   
-
-
   wakeup_answer = wakeup_delay();
 
-  
+  matrix_ptr A = new_matrix(alloc_size);
+  vector_ptr b = new_vector(alloc_size);
+  init_rand(A, b, alloc_size);
+
+  vector_ptr x = new_vector(alloc_size);
+  zero_vector(x, alloc_size);
+
+  conjugate_gradient_pthread(alloc_size, A, b, x);
+
+
+  exit(1);
+
+
+
+
   // float *a0_data_ptr = a0_data;
   /* declare and initialize the matrix structure */
-  matrix_ptr a0 = new_matrix(alloc_size);
+  
   // init_matrix(a0, alloc_size, a0_data_ptr);
 
-  
+  /*
   
   // float *b0_data_ptr = b0_data;
   vector_ptr b0 = new_vector(alloc_size);
   // init_vector(b0, alloc_size, b0_data_ptr);
 
-  init_rand(a0, b0, alloc_size);
+  init_rand(A, b0, alloc_size);
 
   // print_matrix(a0);
   // printf("\n");
@@ -214,17 +306,15 @@ int main(int argc, char *argv[])
 
   
   // exit(1);
-  vector_ptr p0 = new_vector(alloc_size);
-  zero_vector(p0, alloc_size);
+
   // printf("\n");
   // print_vector(p0);
   
   
-  vector_ptr Ad = new_vector(alloc_size);
-  zero_vector(Ad, alloc_size);
+  vector_ptr Ap = new_vector(alloc_size);
+  zero_vector(Ap, alloc_size);
 
-  vector_ptr r0 = new_vector(alloc_size);
-  zero_vector(r0, alloc_size);
+  
 
   vector_ptr d0 = new_vector(alloc_size);
   zero_vector(d0, alloc_size);
@@ -232,7 +322,8 @@ int main(int argc, char *argv[])
   vector_ptr pnew = new_vector(alloc_size);
   zero_vector(pnew, alloc_size);
 
-  mat_vec_mul_serial(alloc_size, a0, p0, Ad);
+  //Compute Ap = A * p
+  mat_vec_mul_serial(alloc_size, A, p, Ap);
   // print_vector(Ad);
   
   data_t *r1 = get_vector_start(r0);
@@ -245,6 +336,7 @@ int main(int argc, char *argv[])
         d1[i] = r1[i];
   }
 
+  exit(1);
   // print_vector(r0);
  
   
@@ -285,85 +377,14 @@ int main(int argc, char *argv[])
     }
   }
   printf("\n");
-
+*/
 //   printf("Wakeup delay computed: %g \n", wakeup_answer);
 } /* end main */
 
 /**********************************************/
 
-/* Create matrix of specified length */
-matrix_ptr new_matrix(long int row_len)
-{
-  long int i;
-  long int alloc;
 
-  /* Allocate and declare header structure */
-  matrix_ptr result = (matrix_ptr) malloc(sizeof(matrix_rec));
-  if (!result) return NULL;  /* Couldn't allocate storage */
-  result->len = row_len;
 
-  /* Allocate and declare array */
-  if (row_len > 0) {
-    alloc = row_len * row_len;
-    data_t *data = (data_t *) calloc(alloc, sizeof(data_t));
-    if (!data) {
-	  free((void *) result);
-	  printf("\n COULDN'T ALLOCATE %ld BYTES STORAGE \n",
-                                                       alloc * sizeof(data_t));
-	  return NULL;  /* Couldn't allocate storage */
-	}
-	result->data = data;
-  } else {
-    result->data = NULL;
-  }
-
-  return result;
-}
-
-/* Set length of matrix */
-int set_matrix_row_length(matrix_ptr m, long int row_len)
-{
-  m->len = row_len;
-  return 1;
-}
-
-/* Return length of matrix */
-long int get_matrix_row_length(matrix_ptr m)
-{
-  return m->len;
-}
-
-/* initialize matrix */
-int init_matrix(matrix_ptr m, long int row_len, float *data_ptr)
-{
-  long int i;
-
-  if (row_len > 0) {
-    m->len = row_len;
-    for (i = 0; i < row_len*row_len; i++) {
-    //  m->data[i] = (data_t)(i);
-      m->data[i] = *data_ptr;
-      data_ptr++;
-    }
-    return 1;
-  }
-  else return 0;
-}
-
-/* initialize matrix */
-int zero_matrix(matrix_ptr m, long int row_len)
-{
-  long int i,j;
-
-  if (row_len > 0) {
-    m->len = row_len;
-    for (i = 0; i < row_len*row_len; i++) {
-      m->data[i] = (data_t)(IDENT);
-    }
-    return 1;
-  }
-  else return 0;
-}
 
 void init_rand(matrix_ptr A, vector_ptr b, long int row_len)
 {
@@ -389,329 +410,103 @@ void init_rand(matrix_ptr A, vector_ptr b, long int row_len)
 
 }
 
-data_t *get_matrix_start(matrix_ptr m)
-{
-  return m->data;
-}
-
-void print_matrix(matrix_ptr m) {
-  long int n = m->len;
-  data_t *data = m->data;
-  for (long int i = 0; i < n; i++) {
-    for (long int j = 0; j < n; j++) {
-      printf("%8.3f ", data[i * n + j]);
-    }
-    printf("\n");
-  }
-  printf("\n");
-}
-/*************************************************/
-vector_ptr new_vector(long int row_len)
-{
-  long int i;
-  long int alloc;
-
-  /* Allocate and declare header structure */
-  vector_ptr result = (vector_ptr) malloc(sizeof(vector_rec));
-  if (!result) return NULL;  /* Couldn't allocate storage */
-  result->len = row_len;
-
-  /* Allocate and declare array */
-  if (row_len > 0) {
-    result->data = (data_t *) calloc(row_len, sizeof(data_t));
-    if (!result->data) { free(result); return NULL; }
-  } else {
-    result->data = NULL;
-  }
-  return result;
-
-}
-data_t *get_vector_start(vector_ptr v)
-{
-  return v->data;
-}
-
-int set_vector_row_length(vector_ptr v, long int row_len)
-{
-  v->len = row_len;
-  return 1;
-}
-long int get_vector_row_length(vector_ptr v)
-{
-   return v->len;
-}
-int init_vector(vector_ptr v, long int row_len, float *data_ptr)
-{
-  if (row_len <= 0) return 0;
-  v->len = row_len;
-  for (long int i = 0; i < row_len; i++) {
-    v->data[i] = *data_ptr;
-    data_ptr++;
-  }
-  return 1;
-}
-
-int zero_vector(vector_ptr v, long int row_len)
-{
-  if (row_len <= 0) return 0;
-  v->len = row_len;
-  for (long int i = 0; i < row_len; i++) {
-    v->data[i] = 0;
-  }
-  return 1;
-}
-void print_vector(vector_ptr v) {
-  long int n = v->len;
-  for (long int i = 0; i < n; i++) {
-    printf("%8.3f\n", v->data[i]);
-  }
-  printf("\n");
-}
 
 /*************************************************/
 
-/* mmm serial*/
-void mat_vec_mul_serial(int n, matrix_ptr A, vector_ptr x, vector_ptr result)
-{
-  int i, j;
 
-  data_t *A_ptr = get_matrix_start(A);
-  data_t *x_ptr = get_vector_start(x);
-  data_t *result_ptr = get_vector_start(result);
+
+
+/*************************************************/
+
+// void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr Ad, vector_ptr pnew0, vector_ptr p0, int N)
+// {
+
+//   pthread_t threads[NUM_THREADS];
+//   struct thread_data thread_data_array[NUM_THREADS];
+//   int rc;
+//   int it = 0;
+//   int converged = 0;
+//   int max_it = 100;
+//   float tolerance = 1e-10;
+//   data_t *r = get_vector_start(r0);
+//   data_t *pnew = get_vector_start(pnew0);
+//   data_t *d = get_vector_start(d0);
+//   data_t *p = get_vector_start(p0);
+//   data_t *Ad_p  = get_vector_start(Ad);
+//   printf("in conjugate grad function\n");
   
-  for (i = 0; i < n; i++) {
-    data_t sum = 0.0;
-    for (j = 0; j < n; j++) {
-      sum += A_ptr[i * n + j] * x_ptr[j];
-    }
-    result_ptr[i] = sum;
-  }
-}
+//   while  (it < max_it)
+//   {
+//     // float rr = dot(r0,r0, N);
+//     float rr = dot_product_pthread_create(N, r0, r0);
+//     // exit(1);
+//     // printf("rr is %f\n", rr);
+//     // exit(1);
 
-void *mat_vec_mul_pthread_func(void *threadarg)
-{
-    struct thread_data *my_data; 
-    my_data = (struct thread_data *) threadarg;
-    int taskid = my_data->thread_id;
-    int n =  my_data->n;
+//     // if (it == 1) exit(1);
+//     /*
+//     for (long t = 0; t < NUM_THREADS; t++)
+//     {
+//       thread_data_array[t].thread_id = t;
 
-    data_t *A_ptr = get_matrix_start(my_data->A);
-    data_t *x_ptr = get_vector_start(my_data->x);
-    data_t *result_ptr = get_vector_start(my_data->result);
-
-    int rows_per_thread = n / NUM_THREADS;
-    int start_row, end_row;
-
-    start_row = taskid * (rows_per_thread);
-    end_row = start_row + rows_per_thread;
-
-    for (int i = start_row; i < end_row; i++) {
-        data_t sum = 0.0;
-        for (int j = 0; j < n; j++) {
-            sum += A_ptr[i * n + j] * x_ptr[j];
-        }
-        result_ptr[i] = sum;
-    }
-    pthread_exit(NULL); 
-}
-
-void mat_vec_mul_pthreads_create(int n, matrix_ptr A, vector_ptr x, vector_ptr result)
-{
-  pthread_t threads[NUM_THREADS];
-  struct thread_data thread_data_array[NUM_THREADS];
-  int rc;
-
-  for (long t = 0; t < NUM_THREADS; t++)
-  {
-    thread_data_array[t].thread_id = t;
-    thread_data_array[t].n = n;
-    thread_data_array[t].A = A;
-    thread_data_array[t].x = x;
-    thread_data_array[t].result = result;
-    rc = pthread_create(&threads[t], NULL, mat_vec_mul_pthread_func,
-                                                (void*) &thread_data_array[t]);
-    if (rc) {
-      printf("ERROR; return code from pthread_create() is %d\n", rc);
-      exit(-1);
-    }
-  }
-
-  for (long t = 0; t < NUM_THREADS; t++) {
-    if (pthread_join(threads[t], NULL)) {
-      exit(19);
-    }
-  }
-}
-
-/*************************************************/
-float dot_serial(int n, vector_ptr a, vector_ptr b) {
-    float sum = 0.0;
-    data_t *a_ptr = get_vector_start(a);
-    data_t *b_ptr = get_vector_start(b);
-    for (int i = 0; i < n; i++) {
-        sum += a_ptr[i] * b_ptr[i];
-    }
-    return sum;
-}
-
-void *dot_product_pthread_func(void *threadarg) {
-    
-    struct thread_data *my_data; 
-    my_data = (struct thread_data *) threadarg;
-    int taskid = my_data->thread_id;
-    int n = my_data->n;
-  
-    float sum = 0.0;
-    data_t *a_ptr = get_vector_start(my_data->a);
-    data_t *b_ptr = get_vector_start(my_data->b);
-
-    int rows_per_thread = n / NUM_THREADS;
-    int start_row, end_row;
-
-    start_row = taskid * (rows_per_thread);
-    end_row = start_row + rows_per_thread;
-
-    for (int i = start_row; i < end_row; i++) {
-        sum += a_ptr[i] * b_ptr[i];
-    }
-
-    my_data->sum = sum;
-
-    pthread_exit(NULL);
-}
-
-float dot_product_pthread_create(int n, vector_ptr a, vector_ptr b)
-{
-  pthread_t threads[NUM_THREADS];
-  struct thread_data thread_data_array[NUM_THREADS];
-  int rc;
-
-  for (long t = 0; t < NUM_THREADS; t++)
-  {
-    thread_data_array[t].thread_id = t;
-    thread_data_array[t].n = n;
-    thread_data_array[t].a = a;
-    thread_data_array[t].b = b;
-    thread_data_array[t].sum = 0.0;
-    rc = pthread_create(&threads[t], NULL, dot_product_pthread_func,
-                                            (void*) &thread_data_array[t]);
-    if (rc) {
-      printf("ERROR; return code from pthread_create() is %d\n", rc);
-      exit(-1);
-    }
-   
-  }
-      
-  for (long t = 0; t < NUM_THREADS; t++) {
-    if (pthread_join(threads[t], NULL)) {
-      exit(19);
-    }
-  }
-
-  float sum = 0.0;
-  for (long t = 0; t < NUM_THREADS; t++)
-  {
-    sum += thread_data_array[t].sum;
-  }
-
-  return sum;
-
-}
-
-/*************************************************/
-
-void conjugate_gradient(vector_ptr r0, matrix_ptr a0, vector_ptr d0, vector_ptr Ad, vector_ptr pnew0, vector_ptr p0, int N)
-{
-
-  pthread_t threads[NUM_THREADS];
-  struct thread_data thread_data_array[NUM_THREADS];
-  int rc;
-  int it = 0;
-  int converged = 0;
-  int max_it = 100;
-  float tolerance = 1e-10;
-  data_t *r = get_vector_start(r0);
-  data_t *pnew = get_vector_start(pnew0);
-  data_t *d = get_vector_start(d0);
-  data_t *p = get_vector_start(p0);
-  data_t *Ad_p  = get_vector_start(Ad);
-  printf("in conjugate grad function\n");
-  
-  while  (it < max_it)
-  {
-    // float rr = dot(r0,r0, N);
-    float rr = dot_product_pthread_create(N, r0, r0);
-    // exit(1);
-    // printf("rr is %f\n", rr);
-    // exit(1);
-    if (sqrt(rr) < tolerance)
-    {
-      converged = 1;
-      break;
-    }
-    // if (it == 1) exit(1);
-    /*
-    for (long t = 0; t < NUM_THREADS; t++)
-    {
-      thread_data_array[t].thread_id = t;
-
-      rc = pthread_create(&threads[t], NULL, mat_vec_mul_pthreads,
-                                              (void*) &thread_data_array[t]);
-      if (rc) {
-        printf("ERROR; return code from pthread_create() is %d\n", rc);
-        exit(-1);
-      }
-    }
+//       rc = pthread_create(&threads[t], NULL, mat_vec_mul_pthreads,
+//                                               (void*) &thread_data_array[t]);
+//       if (rc) {
+//         printf("ERROR; return code from pthread_create() is %d\n", rc);
+//         exit(-1);
+//       }
+//     }
    
     
-    for (long t = 0; t < NUM_THREADS; t++) {
-      if (pthread_join(threads[t], NULL)) {
-        exit(19);
-      }
-    }
-       */
-    // mat_vec_mul_serial(N, a0, d0, Ad);
-    mat_vec_mul_pthreads_create(N, a0, d0, Ad);
+//     for (long t = 0; t < NUM_THREADS; t++) {
+//       if (pthread_join(threads[t], NULL)) {
+//         exit(19);
+//       }
+//     }
+//        */
+//     // mat_vec_mul_serial(N, a0, d0, Ad);
+//     mat_vec_mul_pthreads_create(N, a0, d0, Ad);
 
   
-    // print_vector(Ad);
-    float alpha = rr / dot_product_pthread_create(N, d0, Ad);
-    // print_matrix(a0);
-    // print_vector(d0);
+//     // print_vector(Ad);
+//     float alpha = rr / dot_product_pthread_create(N, d0, Ad);
+//     // print_matrix(a0);
+//     // print_vector(d0);
   
-    // printf("alpha = %f %f\n", alpha, dot(d0, Ad, N));
+//     // printf("alpha = %f %f\n", alpha, dot(d0, Ad, N));
   
    
-    for (int i = 0; i < N; i++) {
-      pnew[i] = p[i] + alpha * d[i];
-      r[i]    = r[i] - alpha * Ad_p[i];
-    }
-    // print_vector(pnew0);
-    // print_vector(r0);
+//     for (int i = 0; i < N; i++) {
+//       pnew[i] = p[i] + alpha * d[i];
+//       r[i]    = r[i] - alpha * Ad_p[i];
+//     }
+//     // print_vector(pnew0);
+//     // print_vector(r0);
    
-    float beta = dot_product_pthread_create(N, r0, r0) / rr;
-    // printf("beta is %f\n", beta);
+//     float beta = dot_product_pthread_create(N, r0, r0) / rr;
+//     // printf("beta is %f\n", beta);
     
-    for (int i = 0; i < N; i++) {
-        d[i] = r[i] + beta * d[i];
-    }
-    // print_vector(d0);
+//     for (int i = 0; i < N; i++) {
+//         d[i] = r[i] + beta * d[i];
+//     }
+//     // print_vector(d0);
   
-    for (int i = 0; i < N; i++) {
-      p[i] = pnew[i];
-    }
-    // print_vector(p0);
+//     for (int i = 0; i < N; i++) {
+//       p[i] = pnew[i];
+//     }
+//     // print_vector(p0);
 
-    it++;
-  }
+//     it++;
+//   }
 
-  if (converged) {
-    printf("Converged after %d iterations\n", it);
-  } else {
-      printf("Did not converge within %d iterations\n", max_it);
-  }
+  
+//   if (converged) {
+//     printf("Converged after %d iterations\n", it);
+//   } else {
+//       printf("Did not converge within %d iterations\n", max_it);
+//   }
 
-  // printf("CG solution: [%.10f, %.10f, %.10f, %.10f]\n", p[0], p[1], p[2], p[3]);
-  // printf("CG Solution: \n");
-  // print_vector(p0);
-}
+//   // printf("CG solution: [%.10f, %.10f, %.10f, %.10f]\n", p[0], p[1], p[2], p[3]);
+//   // printf("CG Solution: \n");
+//   // print_vector(p0);
+// }
