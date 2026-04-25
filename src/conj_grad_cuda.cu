@@ -92,8 +92,7 @@ __global__ void dot_product_shared(int n, data_t* a, data_t* b, data_t* result)
     }
     __syncthreads();
 
-    // Naive interleaved reduction
-    for (int s = blockDim.x / 2; s > 0; s /= 2) {
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
             sData[tid] += sData[tid + s];
         }
