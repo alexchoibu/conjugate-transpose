@@ -105,30 +105,16 @@ __global__ void dot_product_shared(int n, data_t* a, data_t* b, data_t* result)
     }
 }
 
-/* ================= VECTOR COPY GPU KERNELS ================= */
+/* ================= VECTOR COPY GPU KERNEL ================= */
 // Vector copy: y = x
 
-// Naive version (global memory only)
-__global__ void vec_copy_naive(int n, data_t* x, data_t* y)
+// Global memory only (best version since memory-bound and coalesced)
+// Shared memory introduces unnecessary overhead
+__global__ void vec_copy_kernel(int n, data_t* x, data_t* y)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
         y[i] = x[i];
-    }
-}
-
-// Optimization 1: Naive shared memory
-__global__ void vec_copy_shared(int n, data_t* x, data_t* y)
-{
-    __shared__ data_t sData[TILE_WIDTH];
-
-    int tid = threadIdx.x;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (i < n) {
-        sData[tid] = x[i];
-        __syncthreads();
-        y[i] = sData[tid];
     }
 }
 
@@ -260,47 +246,36 @@ void conj_grad_cpu(int n, data_t* A, data_t* b, data_t* x) {
 
 /* ================= GPU KERNEL LAUNCHERS ================= */
 void launch_dot(KernelType kt, int grid, int block, int n, data_t* a, data_t* b, data_t* result) {
-    // switch (kt) {
-    //     case NAIVE_GLOBAL:
-            dot_product_naive<<<grid, block>>>(n, a, b, result);
-    //         break;
-    //     case NAIVE_SHARED:
-    //         dot_product_shared<<<grid, block>>>(n, a, b, result);
-    //         break;
-    // }
-}
-
-void launch_copy(KernelType kt, int grid, int block, int n, data_t* x, data_t* y) {
     switch (kt) {
         case NAIVE_GLOBAL:
-            vec_copy_naive<<<grid, block>>>(n, x, y);
+            dot_product_naive<<<grid, block>>>(n, a, b, result);
             break;
         case NAIVE_SHARED:
-            vec_copy_shared<<<grid, block>>>(n, x, y);
+            dot_product_shared<<<grid, block>>>(n, a, b, result);
             break;
     }
 }
 
 void launch_matvec(KernelType kt, int grid, int block, int n, data_t* A, data_t* x, data_t* result) {
-    // switch (kt) {
-    //     case NAIVE_GLOBAL:
+    switch (kt) {
+        case NAIVE_GLOBAL:
             mat_vec_mul_naive<<<grid, block>>>(n, A, x, result);
-    //         break;
-    //     case NAIVE_SHARED:
-    //         mat_vec_mul_shared<<<grid, block>>>(n, A, x, result);
-    //         break;
-    // }
+            break;
+        case NAIVE_SHARED:
+            mat_vec_mul_shared<<<grid, block>>>(n, A, x, result);
+            break;
+    }
 }
 
 void launch_vecadd(KernelType kt, int grid, int block, int n, data_t a, data_t* x, data_t* y, data_t* z) {
-    // switch (kt) {
-    //     case NAIVE_GLOBAL:
+    switch (kt) {
+        case NAIVE_GLOBAL:
             vec_mul_add_naive<<<grid, block>>>(n, a, x, y, z);
-    //         break;
-    //     case NAIVE_SHARED:
-    //         vec_mul_add_shared<<<grid, block>>>(n, a, x, y, z);
-    //         break;
-    // }
+            break;
+        case NAIVE_SHARED:
+            vec_mul_add_shared<<<grid, block>>>(n, a, x, y, z);
+            break;
+    }
 }
 
 /* ================= CG GPU WRAPPER ================= */
@@ -337,11 +312,11 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
     
     // Initial r = b - Ax (assuming initial x is zeros)
     // r = b
-    launch_copy(kc.type, gridSize, blockSize, n, bd, rd);
+    vec_copy_kernel<<<gridSize, blockSize>>>(n, bd, rd);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // p = r (initial search direction)
-    launch_copy(kc.type, gridSize, blockSize, n, rd, pd);
+    vec_copy_kernel<<<gridSize, blockSize>>>(n, rd, pd);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // rsold = r · r
