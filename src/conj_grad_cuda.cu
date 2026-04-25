@@ -227,7 +227,10 @@ data_t dot_product(int n, data_t *a, data_t *b) {
 
 // Conjugate Gradient CPU reference
 void conj_grad_cpu(int n, data_t* A, data_t* b, data_t* x) {
-    data_t r[n], p[n], Ap[n];
+    data_t* r = (data_t*) malloc(n * sizeof(data_t));
+    data_t* p = (data_t*) malloc(n * sizeof(data_t));
+    data_t* Ap = (data_t*) malloc(n * sizeof(data_t));
+
     data_t rsold, rsnew, alpha, beta;
 
     // Initial r = b - Ax
@@ -268,6 +271,11 @@ void conj_grad_cpu(int n, data_t* A, data_t* b, data_t* x) {
 
         rsold = rsnew;
     }
+
+    // Free CPU memory
+    free(r);
+    free(p);
+    free(Ap);
 }
 
 /* ================= GPU KERNEL LAUNCHERS ================= */
