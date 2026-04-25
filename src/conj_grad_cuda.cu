@@ -28,7 +28,8 @@ typedef double data_t;
 enum KernelType {
     NAIVE_GLOBAL,
     NAIVE_SHARED,
-    REDUCE_SHARED
+    REDUCE_SHARED,
+    UNROLL_SHARED
 };
 
 struct KernelConfig {
@@ -39,7 +40,8 @@ struct KernelConfig {
 KernelConfig configs[] = {
     {"Naive Global", NAIVE_GLOBAL},
     {"Naive Shared", NAIVE_SHARED},
-    {"Reduce Shared", REDUCE_SHARED}
+    {"Reduce Shared", REDUCE_SHARED},
+    {"Unroll Shared", UNROLL_SHARED}
 };
 
 const int NUM_CONFIGS = sizeof(configs) / sizeof(configs[0]);
@@ -177,6 +179,40 @@ __global__ void dot_product_reduce(int n, data_t* a, data_t* b, data_t* result)
     if (tid == 0) atomicAdd(result, sData[0]);
 }
 
+// Optimization 3: Loop unrolling
+__global__ void dot_product_unroll(int n, data_t* a, data_t* b, data_t* result)
+{    
+    __shared__ data_t sData[TILE_WIDTH];
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
+
+    data_t val = 0.0;
+    if (i < n) val += a[i] * b[i];
+    if (i + blockDim.x < n) val += a[i + blockDim.x] * b[i + blockDim.x];
+    sData[tid] = val;
+    __syncthreads();
+
+    // Reduce within block
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (tid < s) sData[tid] += sData[tid + s];
+        __syncthreads();
+    }
+
+    // Warp level reduction (no synchronization needed)
+    if (tid < 32) {
+        volatile data_t* smem = sData;
+        smem[tid] += smem[tid + 32];
+        smem[tid] += smem[tid + 16];
+        smem[tid] += smem[tid + 8];
+        smem[tid] += smem[tid + 4];
+        smem[tid] += smem[tid + 2];
+        smem[tid] += smem[tid + 1];
+    }
+
+    if (tid == 0) atomicAdd(result, sData[0]);
+}
+
 /* ================= MATRIX-VECTOR MULTIPLICATION GPU KERNELS ================= */
 // Matrix-vector multiplication: result = A * x
 
@@ -208,6 +244,30 @@ __global__ void mat_vec_mul_shared(int n, data_t* A, data_t* x, data_t* result)
         sX[tid] = (tid + tile < n) ? x[tid + tile] : 0.0;
         __syncthreads();
 
+        for (int j = 0; j < TILE_WIDTH && (tile + j) < n; j++) {
+            sum += A[i*n + tile + j] * sX[j];
+        }
+        __syncthreads();
+    }
+    result[i] = sum;
+}
+
+// Optimization 2: Loop unrolling
+__global__ void mat_vec_mul_unroll(int n, data_t* A, data_t* x, data_t* result)
+{
+    __shared__ data_t sX[TILE_WIDTH];
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i >= n) return;
+
+    data_t sum = 0.0;
+    for (int tile = 0; tile < n; tile += TILE_WIDTH) {
+        sX[tid] = (tid + tile < n) ? x[tid + tile] : 0.0;
+        __syncthreads();
+
+        #pragma unroll 8
         for (int j = 0; j < TILE_WIDTH && (tile + j) < n; j++) {
             sum += A[i*n + tile + j] * sX[j];
         }
@@ -284,6 +344,7 @@ void launch_dot(KernelType kt, int grid, int block, int n, data_t* a, data_t* b,
         case NAIVE_GLOBAL: dot_product_naive<<<grid, block>>>(n, a, b, result); break;
         case NAIVE_SHARED: dot_product_shared<<<grid, block>>>(n, a, b, result); break;
         case REDUCE_SHARED: dot_product_reduce<<<grid, block>>>(n, a, b, result); break;
+        case UNROLL_SHARED: dot_product_unroll<<<grid, block>>>(n, a, b, result); break;
     }
 }
 
@@ -292,6 +353,7 @@ void launch_matvec(KernelType kt, int grid, int block, int n, data_t* A, data_t*
         case NAIVE_GLOBAL: mat_vec_mul_naive<<<grid, block>>>(n, A, x, result); break;
         case NAIVE_SHARED: mat_vec_mul_shared<<<grid, block>>>(n, A, x, result); break;
         case REDUCE_SHARED: mat_vec_mul_shared<<<grid, block>>>(n, A, x, result); break;
+        case UNROLL_SHARED: mat_vec_mul_unroll<<<grid, block>>>(n, A, x, result); break;
     }
 }
 
