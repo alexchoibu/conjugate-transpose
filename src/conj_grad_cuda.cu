@@ -6,7 +6,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
-#include <ctime>
+#include <time.h>
 #include <cuda_runtime.h>
 
 #define CUDA_SAFE_CALL(ans) { gpuAssert((ans), (char *)__FILE__, __LINE__); }
@@ -20,8 +20,15 @@ inline void gpuAssert(cudaError_t code, char *file, int line, bool abort=true)
   }
 }
 
+#define TILE_WIDTH 256
+#define MAX_ITERS 1000
 #define TOL 1e-6
 typedef double data_t;
+
+enum KernelType {
+    NAIVE_GLOBAL,
+    NAIVE_SHARED
+};
 
 /* -=-=-=-=- Time measurement by clock_gettime() -=-=-=-=- */
 /*
@@ -46,10 +53,11 @@ double interval(struct timespec start, struct timespec end)
   return (((double)temp.tv_sec) + ((double)temp.tv_nsec)*1.0e-9);
 }
 
-/* ================= GPU KERNELS ================= */
-
+/* ================= DOT PRODUCT GPU KERNELS ================= */
 // Dot product: result = <a, b>
-__global__ void dot_product_kernel(int n, data_t* a, data_t* b, data_t* result)
+
+// Naive version (global memory only)
+__global__ void dot_product_naive(int n, data_t* a, data_t* b, data_t* result)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -57,8 +65,39 @@ __global__ void dot_product_kernel(int n, data_t* a, data_t* b, data_t* result)
     }
 }
 
+// Optimization 1: Naive shared memory
+__global__ void dot_product_shared(int n, data_t* a, data_t* b, data_t* result)
+{
+    __shared__ data_t sData[TILE_WIDTH];
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < n) {
+        sData[tid] = a[i] * b[i];
+    } else {
+        sData[tid] = 0.0;
+    }
+    __syncthreads();
+
+    // Naive interleaved reduction
+    for (int s = 1; s < blockDim.x; s *= 2) {
+        if (tid % (2 * s) == 0) {
+            sData[tid] += sData[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAdd(result, sData[0]);
+    }
+}
+
+/* ================= VECTOR COPY GPU KERNELS ================= */
 // Vector copy: y = x
-__global__ void vec_copy_kernel(int n, data_t* x, data_t* y)
+
+// Naive version (global memory only)
+__global__ void vec_copy_naive(int n, data_t* x, data_t* y)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -66,8 +105,26 @@ __global__ void vec_copy_kernel(int n, data_t* x, data_t* y)
     }
 }
 
+// Optimization 1: Naive shared memory
+__global__ void vec_copy_shared(int n, data_t* x, data_t* y)
+{
+    __shared__ data_t sData[TILE_WIDTH];
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < n) {
+        sData[tid] = x[i];
+        __syncthreads();
+        y[i] = sData[tid];
+    }
+}
+
+/* ================= MATRIX-VECTOR MULTIPLICATION GPU KERNELS ================= */
 // Matrix-vector multiplication: result = A * x
-__global__ void mat_vec_mul_kernel(int n, data_t* A, data_t* x, data_t* result)
+
+// Naive version (global memory only)
+__global__ void mat_vec_mul_naive(int n, data_t* A, data_t* x, data_t* result)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -79,12 +136,59 @@ __global__ void mat_vec_mul_kernel(int n, data_t* A, data_t* x, data_t* result)
     }
 }
 
+// Optimization 1: Naive shared memory
+__global__ void mat_vec_mul_shared(int n, data_t* A, data_t* x, data_t* result)
+{
+    __shared__ data_t sX[TILE_WIDTH];
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i >= n) return;
+
+    data_t sum = 0.0;
+    for (int tile = 0; tile < n; tile += TILE_WIDTH) {
+        if (tid + tile < n) {
+            sX[tid] = x[tid + tile];
+        } else {
+            sX[tid] = 0.0;
+        }
+        __syncthreads();
+
+        for (int j = 0; j < TILE_WIDTH && (tile + j) < n; j++) {
+            sum += A[i*n + tile + j] * sX[j];
+        }
+        __syncthreads();
+    }
+    result[i] = sum;
+}
+
+/* ================= VECTOR MULTIPLY AND ADD GPU KERNELS ================= */
 // Vector multiply and add: z = a * x + y
-__global__ void vec_mul_add_kernel(int n, data_t a, data_t* x, data_t* y, data_t* z)
+
+// Naive version (global memory only)
+__global__ void vec_mul_add_naive(int n, data_t a, data_t* x, data_t* y, data_t* z)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
         z[i] = a * x[i] + y[i];
+    }
+}
+
+// Optimization 1: Naive shared memory
+__global__ void vec_mul_add_shared(int n, data_t a, data_t* x, data_t* y, data_t* z)
+{
+    __shared__ data_t sX[TILE_WIDTH];
+    __shared__ data_t sY[TILE_WIDTH];
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < n) {
+        sX[tid] = x[i];
+        sY[tid] = y[i];
+        __syncthreads();
+        z[i] = a * sX[tid] + sY[tid];
     }
 }
 
@@ -143,10 +247,55 @@ void conj_grad_cpu(int n, data_t* A, data_t* b, data_t* x) {
     }
 }
 
-/* ================= CG WRAPPER ================= */
+/* ================= GPU KERNEL LAUNCHERS ================= */
+void launch_dot(KernelType kt, int grid, int block, int n, data_t* a, data_t* b, data_t* result) {
+    switch (kt) {
+        case NAIVE_GLOBAL:
+            dot_product_naive<<<grid, block>>>(n, a, b, result);
+            break;
+        case NAIVE_SHARED:
+            dot_product_shared<<<grid, block>>>(n, a, b, result);
+            break;
+    }
+}
+
+void launch_copy(KernelType kt, int grid, int block, int n, data_t* x, data_t* y) {
+    switch (kt) {
+        case NAIVE_GLOBAL:
+            vec_copy_naive<<<grid, block>>>(n, x, y);
+            break;
+        case NAIVE_SHARED:
+            vec_copy_shared<<<grid, block>>>(n, x, y);
+            break;
+    }
+}
+
+void launch_matvec(KernelType kt, int grid, int block, int n, data_t* A, data_t* x, data_t* result) {
+    switch (kt) {
+        case NAIVE_GLOBAL:
+            mat_vec_mul_naive<<<grid, block>>>(n, A, x, result);
+            break;
+        case NAIVE_SHARED:
+            mat_vec_mul_shared<<<grid, block>>>(n, A, x, result);
+            break;
+    }
+}
+
+void launch_vecadd(KernelType kt, int grid, int block, int n, data_t a, data_t* x, data_t* y, data_t* z) {
+    switch (kt) {
+        case NAIVE_GLOBAL:
+            vec_mul_add_naive<<<grid, block>>>(n, a, x, y, z);
+            break;
+        case NAIVE_SHARED:
+            vec_mul_add_shared<<<grid, block>>>(n, a, x, y, z);
+            break;
+    }
+}
+
+/* ================= CG GPU WRAPPER ================= */
 
 // Conjugate gradient GPU wrapper function
-void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x)
+void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelType kt)
 {
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -154,8 +303,8 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x)
 
     float elapsed;
 
-    int blockSize = 256;
-    int gridSize = (n + blockSize - 1) / blockSize;
+    int blockSize = TILE_WIDTH;
+    int gridSize = (n + TILE_WIDTH - 1) / TILE_WIDTH;
 
     // Allocate device memory
     data_t *Ad, *bd, *xd, *rd, *pd, *Apd, *temp_result;
@@ -177,30 +326,30 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x)
     
     // Initial r = b - Ax (assuming initial x is zeros)
     // r = b
-    vec_copy_kernel<<<gridSize, blockSize>>>(n, bd, rd);
+    launch_copy(kt, gridSize, blockSize, n, bd, rd);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // p = r (initial search direction)
-    vec_copy_kernel<<<gridSize, blockSize>>>(n, rd, pd);
+    launch_copy(kt, gridSize, blockSize, n, rd, pd);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // rsold = r · r
     CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-    dot_product_kernel<<<gridSize, blockSize>>>(n, rd, rd, temp_result);
+    launch_dot(kt, gridSize, blockSize, n, rd, rd, temp_result);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     data_t rsold;
     CUDA_SAFE_CALL(cudaMemcpy(&rsold, temp_result, sizeof(data_t), cudaMemcpyDeviceToHost));
     
     // CG iterations
-    for (int iter = 0; iter < n; iter++) {
+    for (int iter = 0; iter < MAX_ITERS; iter++) {
         // Compute Ap = A * p
-        mat_vec_mul_kernel<<<gridSize, blockSize>>>(n, Ad, pd, Apd);
+        launch_matvec(kt, gridSize, blockSize, n, Ad, pd, Apd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // alpha = rsold / (p · Ap)
         CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-        dot_product_kernel<<<gridSize, blockSize>>>(n, pd, Apd, temp_result);
+        launch_dot(kt, gridSize, blockSize, n, pd, Apd, temp_result);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         data_t pAp;
@@ -209,16 +358,16 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x)
         data_t alpha = rsold / pAp;
         
         // x = x + alpha * p
-        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, alpha, pd, xd, xd);
+        launch_vecadd(kt, gridSize, blockSize, n, alpha, pd, xd, xd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // r = r - alpha * Ap
-        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, -alpha, Apd, rd, rd);
+        launch_vecadd(kt, gridSize, blockSize, n, -alpha, Apd, rd, rd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // rsnew = r · r
         CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-        dot_product_kernel<<<gridSize, blockSize>>>(n, rd, rd, temp_result);
+        launch_dot(kt, gridSize, blockSize, n, rd, rd, temp_result);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         data_t rsnew;
@@ -231,7 +380,7 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x)
         data_t beta = rsnew / rsold;
         
         // p = r + beta * p
-        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, beta, pd, rd, pd);
+        launch_vecadd(kt, gridSize, blockSize, n, beta, pd, rd, pd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         rsold = rsnew;
@@ -310,21 +459,49 @@ int main()
 
         // CPU reference
         clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
-        conj_grad_cpu(width, h_A, h_b, h_x);
+        conj_grad_cpu(width, h_A, h_b, h_gold);
         clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
         double timestamp = interval(time_start, time_stop);
         printf("CPU time: %f ms\n", timestamp * 1000.0);
 
-        // GPU computation
-        conj_grad_gpu(width, h_A, h_b, h_x);
+        // Define GPU kernels
+        KernelSet kernels[] = {
+            {
+                "Naive Global", 
+                dot_product_naive,
+                vec_copy_naive,
+                mat_vec_mul_naive,
+                vec_mul_add_naive
+            },
+            {
+                "Naive Shared", 
+                dot_product_shared,
+                vec_copy_shared,
+                mat_vec_mul_shared,
+                vec_mul_add_shared
+            }
+        };
 
-        // Verify correctness
-        data_t max_err = 0.0;
-        for (int i = 0; i < width; i++) {
-            data_t diff = fabs(h_x[i] - h_gold[i]);
-            if (diff > max_err) max_err = diff;
+        int num_configs = sizeof(kernels) / sizeof(KernelSet);
+        for (int k = 0; k < num_configs; k++) {
+            printf("\n--- %s ---\n", kernels[k].name);
+
+            // Reset initial guess for GPU
+            for (int i = 0; i < width; i++) {
+                h_x[i] = 0.0;
+            }
+
+            // GPU computation
+            conj_grad_gpu(width, h_A, h_b, h_x, kernels[k]);
+
+            // Verify correctness
+            data_t max_err = 0.0;
+            for (int i = 0; i < width; i++) {
+                data_t diff = fabs(h_x[i] - h_gold[i]);
+                if (diff > max_err) max_err = diff;
+            }
+            printf("Max error: %.10f\n", max_err);
         }
-        printf("Max error: %.10f\n", max_err);
 
         // Free host memory
         free(h_A);
