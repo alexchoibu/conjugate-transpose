@@ -263,16 +263,31 @@ __global__ void mat_vec_mul_unroll(int n, data_t* A, data_t* x, data_t* result)
     if (i >= n) return;
 
     data_t sum = 0.0;
-    for (int tile = 0; tile < n; tile += TILE_WIDTH) {
-        sX[tid] = (tid + tile < n) ? x[tid + tile] : 0.0;
+    int numFullTiles = (n / TILE_WIDTH) * TILE_WIDTH;
+
+    // Full tiles with unrolling
+    for (int tile = 0; tile < numFullTiles; tile += TILE_WIDTH) {
+        sX[tid] = x[tid + tile];
         __syncthreads();
 
         #pragma unroll 8
-        for (int j = 0; j < TILE_WIDTH && (tile + j) < n; j++) {
+        for (int j = 0; j < TILE_WIDTH; j++) {
             sum += A[i*n + tile + j] * sX[j];
         }
         __syncthreads();
     }
+
+    // Remaining elements
+    if (numFullTiles < n) {
+        sX[tid] = (tid + numFullTiles < n) ? x[tid + numFullTiles] : 0.0;
+        __syncthreads();
+        
+        for (int j = 0; j < TILE_WIDTH && (numFullTiles + j) < n; j++) {
+            sum += A[i*n + numFullTiles + j] * sX[j];
+        }
+        __syncthreads();
+    }
+    
     result[i] = sum;
 }
 
@@ -341,19 +356,34 @@ void conj_grad_cpu(int n, data_t* A, data_t* b, data_t* x) {
 /* ================= GPU KERNEL LAUNCHERS ================= */
 void launch_dot(KernelType kt, int grid, int block, int n, data_t* a, data_t* b, data_t* result) {
     switch (kt) {
-        case NAIVE_GLOBAL: dot_product_naive<<<grid, block>>>(n, a, b, result); break;
-        case NAIVE_SHARED: dot_product_shared<<<grid, block>>>(n, a, b, result); break;
-        case REDUCE_SHARED: dot_product_reduce<<<grid, block>>>(n, a, b, result); break;
-        case UNROLL_SHARED: dot_product_unroll<<<grid, block>>>(n, a, b, result); break;
+        case NAIVE_GLOBAL: 
+            dot_product_naive<<<grid, block>>>(n, a, b, result); 
+            break;
+        case NAIVE_SHARED: 
+            dot_product_shared<<<grid, block>>>(n, a, b, result); 
+            break;
+        case REDUCE_SHARED: 
+            dot_product_reduce<<<grid, block>>>(n, a, b, result); 
+            break;
+        case UNROLL_SHARED: 
+            int unrollGrid = (n + (block * 2) - 1) / (block * 2); // Adjust grid size for unrolling
+            dot_product_unroll<<<unrollGrid, block>>>(n, a, b, result); 
+            break;
     }
 }
 
 void launch_matvec(KernelType kt, int grid, int block, int n, data_t* A, data_t* x, data_t* result) {
     switch (kt) {
-        case NAIVE_GLOBAL: mat_vec_mul_naive<<<grid, block>>>(n, A, x, result); break;
-        case NAIVE_SHARED: mat_vec_mul_shared<<<grid, block>>>(n, A, x, result); break;
-        case REDUCE_SHARED: mat_vec_mul_shared<<<grid, block>>>(n, A, x, result); break;
-        case UNROLL_SHARED: mat_vec_mul_unroll<<<grid, block>>>(n, A, x, result); break;
+        case NAIVE_GLOBAL: 
+            mat_vec_mul_naive<<<grid, block>>>(n, A, x, result); 
+            break;
+        case NAIVE_SHARED: 
+        case REDUCE_SHARED: 
+            mat_vec_mul_shared<<<grid, block>>>(n, A, x, result); 
+            break;
+        case UNROLL_SHARED: 
+            mat_vec_mul_unroll<<<grid, block>>>(n, A, x, result); 
+            break;
     }
 }
 
