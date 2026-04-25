@@ -30,6 +30,18 @@ enum KernelType {
     NAIVE_SHARED
 };
 
+struct KernelConfig {
+    const char* name;
+    KernelType type;
+};
+
+#define NUM_CONFIGS 2
+
+KernelConfig configs[] = {
+    {"Naive Global", NAIVE_GLOBAL},
+    {"Naive Shared", NAIVE_SHARED}
+};
+
 /* -=-=-=-=- Time measurement by clock_gettime() -=-=-=-=- */
 /*
   As described in the clock_gettime manpage (type "man clock_gettime" at the
@@ -295,7 +307,7 @@ void launch_vecadd(KernelType kt, int grid, int block, int n, data_t a, data_t* 
 /* ================= CG GPU WRAPPER ================= */
 
 // Conjugate gradient GPU wrapper function
-void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelType kt)
+void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc)
 {
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -326,16 +338,16 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelType kt)
     
     // Initial r = b - Ax (assuming initial x is zeros)
     // r = b
-    launch_copy(kt, gridSize, blockSize, n, bd, rd);
+    launch_copy(kc.kt, gridSize, blockSize, n, bd, rd);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // p = r (initial search direction)
-    launch_copy(kt, gridSize, blockSize, n, rd, pd);
+    launch_copy(kc.kt, gridSize, blockSize, n, rd, pd);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // rsold = r · r
     CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-    launch_dot(kt, gridSize, blockSize, n, rd, rd, temp_result);
+    launch_dot(kc.kt, gridSize, blockSize, n, rd, rd, temp_result);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     data_t rsold;
@@ -344,12 +356,12 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelType kt)
     // CG iterations
     for (int iter = 0; iter < MAX_ITERS; iter++) {
         // Compute Ap = A * p
-        launch_matvec(kt, gridSize, blockSize, n, Ad, pd, Apd);
+        launch_matvec(kc.kt, gridSize, blockSize, n, Ad, pd, Apd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // alpha = rsold / (p · Ap)
         CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-        launch_dot(kt, gridSize, blockSize, n, pd, Apd, temp_result);
+        launch_dot(kc.kt, gridSize, blockSize, n, pd, Apd, temp_result);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         data_t pAp;
@@ -358,16 +370,16 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelType kt)
         data_t alpha = rsold / pAp;
         
         // x = x + alpha * p
-        launch_vecadd(kt, gridSize, blockSize, n, alpha, pd, xd, xd);
+        launch_vecadd(kc.kt, gridSize, blockSize, n, alpha, pd, xd, xd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // r = r - alpha * Ap
-        launch_vecadd(kt, gridSize, blockSize, n, -alpha, Apd, rd, rd);
+        launch_vecadd(kc.kt, gridSize, blockSize, n, -alpha, Apd, rd, rd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // rsnew = r · r
         CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-        launch_dot(kt, gridSize, blockSize, n, rd, rd, temp_result);
+        launch_dot(kc.kt, gridSize, blockSize, n, rd, rd, temp_result);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         data_t rsnew;
@@ -380,7 +392,7 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelType kt)
         data_t beta = rsnew / rsold;
         
         // p = r + beta * p
-        launch_vecadd(kt, gridSize, blockSize, n, beta, pd, rd, pd);
+        launch_vecadd(kc.kt, gridSize, blockSize, n, beta, pd, rd, pd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         rsold = rsnew;
@@ -396,7 +408,7 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelType kt)
     // Calculate elapsed time
     cudaEventElapsedTime(&elapsed, start, stop);
 
-    printf("GPU time: %f ms\n", elapsed);
+    printf("%s GPU time: %f ms\n", kc.name, elapsed);
     
     // Free device memory
     CUDA_SAFE_CALL(cudaFree(Ad));
@@ -464,17 +476,14 @@ int main()
         double timestamp = interval(time_start, time_stop);
         printf("CPU time: %f ms\n", timestamp * 1000.0);
 
-        for (int kt = NAIVE_GLOBAL; kt <= NAIVE_SHARED; kt++) {
-            KernelType ktype = static_cast<KernelType>(kt);
-            printf("\n--- GPU Config: %d ---\n", kt);
-
+        for (int kt = 0; kt < NUM_CONFIGS; kt++) {            
             // Reset initial guess for GPU
             for (int i = 0; i < width; i++) {
                 h_x[i] = 0.0;
             }
 
             // GPU computation
-            conj_grad_gpu(width, h_A, h_b, h_x, ktype);
+            conj_grad_gpu(width, h_A, h_b, h_x, configs[kt]);
 
             // Verify correctness
             data_t max_err = 0.0;
