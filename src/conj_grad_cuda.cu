@@ -450,11 +450,6 @@ int main()
         printf("CPU time: %f ms\n", timestamp * 1000.0);
 
         for (int idx = 0; idx < NUM_CONFIGS; idx++) {            
-            // Reset initial guess for GPU
-            for (int i = 0; i < width; i++) {
-                h_x[i] = 0.0;
-            }
-
             // GPU computation
             conj_grad_gpu(width, h_A, h_b, h_x, configs[idx]);
 
@@ -465,6 +460,11 @@ int main()
                 if (diff > max_err) max_err = diff;
             }
             printf("Max error: %.10f\n", max_err);
+
+            // Reset initial guess for GPU
+            for (int i = 0; i < width; i++) {
+                h_x[i] = 0.0;
+            }
         }
 
         // Free host memory
