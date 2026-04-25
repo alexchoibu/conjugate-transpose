@@ -35,12 +35,12 @@ struct KernelConfig {
     KernelType type;
 };
 
-#define NUM_CONFIGS 2
-
 KernelConfig configs[] = {
     {"Naive Global", NAIVE_GLOBAL},
     {"Naive Shared", NAIVE_SHARED}
 };
+
+const int NUM_CONFIGS = sizeof(configs) / sizeof(configs[0]);
 
 /* -=-=-=-=- Time measurement by clock_gettime() -=-=-=-=- */
 /*
@@ -218,13 +218,12 @@ void conj_grad_cpu(int n, data_t* A, data_t* b, data_t* x) {
     data_t r[n], p[n], Ap[n];
     data_t rsold, rsnew, alpha, beta;
 
-    // Initial r = b - Ax (assuming initial x is zeros)
+    // Initial r = b - Ax
     for (int i = 0; i < n; i++) {
-        // Need to use following if x != 0:
-        // double Ax0 = 0;
-        // for (int j = 0; j < n; j++) Ax0 += A[i][j] * x[j];
-        // r[i] = b[i] - Ax0;
-        r[i] = b[i];
+        double Ax0 = 0;
+        for (int j = 0; j < n; j++) 
+            Ax0 += A[i * n + j] * x[j];
+        r[i] = b[i] - Ax0;
         p[i] = r[i]; // Initial search direction is the residual
     }
 
@@ -476,14 +475,14 @@ int main()
         double timestamp = interval(time_start, time_stop);
         printf("CPU time: %f ms\n", timestamp * 1000.0);
 
-        for (int kt = 0; kt < NUM_CONFIGS; kt++) {            
+        for (int idx = 0; idx < NUM_CONFIGS; idx++) {            
             // Reset initial guess for GPU
             for (int i = 0; i < width; i++) {
                 h_x[i] = 0.0;
             }
 
             // GPU computation
-            conj_grad_gpu(width, h_A, h_b, h_x, configs[kt]);
+            conj_grad_gpu(width, h_A, h_b, h_x, configs[idx]);
 
             // Verify correctness
             data_t max_err = 0.0;
