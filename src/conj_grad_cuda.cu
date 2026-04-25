@@ -464,6 +464,7 @@ int main()
             
             // GPU computation
             conj_grad_gpu(width, h_A, h_b, h_x, configs[idx]);
+            printf("h_gold[0] = %.10f, h_x[0] = %.10f\n", h_gold[0], h_x[0]);
 
             // Verify correctness
             data_t max_err = 0.0;
