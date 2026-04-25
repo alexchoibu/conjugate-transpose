@@ -67,6 +67,26 @@ double interval(struct timespec start, struct timespec end)
   return (((double)temp.tv_sec) + ((double)temp.tv_nsec)*1.0e-9);
 }
 
+// ================= DEVICE SCALAR KERNELS ================= */
+// Keep scalars on device to avoid unnecessary host-device transfers
+
+__global__ void alpha_kernel(data_t* rsold, data_t* pAp, data_t* alpha) {
+    if (threadIdx.x == 0 && blockIdx.x == 0)
+        *alpha = *rsold / *pAp;
+}
+
+__global__ void beta_kernel(data_t* rsnew, data_t* rsold, data_t* beta) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        *beta = *rsnew / *rsold;
+        *rsold = *rsnew; // Update rsold for next iteration
+    }
+}
+
+__global__ void convergence_kernel(data_t* rsnew, int* converged) {
+    if (threadIdx.x == 0 && blockIdx.x == 0)
+        *converged = (sqrt(*rsnew) < TOL) ? 1 : 0;
+}
+
 /* ================= VECTOR COPY GPU KERNEL ================= */
 // Vector copy: y = x
 
@@ -78,17 +98,23 @@ __global__ void vec_copy_kernel(int n, data_t* x, data_t* y)
     if (i < n) y[i] = x[i];
 }
 
-/* ================= VECTOR MULTIPLY AND ADD GPU KERNEL ================= */
+/* ================= VECTOR MULTIPLY AND ADD/SUB GPU KERNELS ================= */
 // Vector multiply and add: z = a * x + y
 
 // Global memory only (best version since memory-bound and coalesced)
 // Shared memory introduces unnecessary overhead
-__global__ void vec_mul_add_kernel(int n, data_t a, data_t* x, data_t* y, data_t* z)
+__global__ void vec_mul_add_kernel(int n, data_t* a, data_t* x, data_t* y, data_t* z)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        z[i] = a * x[i] + y[i];
-    }
+    if (i < n) z[i] = (*a) * x[i] + y[i];
+}
+
+// Global memory only (best version since memory-bound and coalesced
+// Shared memory introduces unnecessary overhead
+__global__ void vec_mul_sub_kernel(int n, data_t* a, data_t* x, data_t* y, data_t* z)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) z[i] =  -(*a) * x[i] + y[i];
 }
 
 /* ================= DOT PRODUCT GPU KERNELS ================= */
@@ -190,29 +216,6 @@ __global__ void mat_vec_mul_shared(int n, data_t* A, data_t* x, data_t* result)
     result[i] = sum;
 }
 
-// Optimization 2: Warp level reduction
-__global__ void mat_vec_mul_reduce(int n, data_t* A, data_t* x, data_t* result)
-{
-    __shared__ data_t sX[TILE_WIDTH];
-
-    int tid = threadIdx.x;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (i >= n) return;
-
-    data_t sum = 0.0;
-    for (int tile = 0; tile < n; tile += TILE_WIDTH) {
-        sX[tid] = (tid + tile < n) ? x[tid + tile] : 0.0;
-        __syncthreads();
-
-        for (int j = 0; j < TILE_WIDTH && (tile + j) < n; j++) {
-            sum += A[i*n + tile + j] * sX[j];
-        }
-        __syncthreads();
-    }
-    result[i] = sum;
-}
-
 /* ================= CPU Reference ================= */
 
 // Helper to compute dot product of two vectors
@@ -280,7 +283,7 @@ void launch_matvec(KernelType kt, int grid, int block, int n, data_t* A, data_t*
     switch (kt) {
         case NAIVE_GLOBAL: mat_vec_mul_naive<<<grid, block>>>(n, A, x, result); break;
         case NAIVE_SHARED: mat_vec_mul_shared<<<grid, block>>>(n, A, x, result); break;
-        case REDUCE_SHARED: mat_vec_mul_reduce<<<grid, block>>>(n, A, x, result); break;
+        case REDUCE_SHARED: mat_vec_mul_shared<<<grid, block>>>(n, A, x, result); break;
     }
 }
 
@@ -299,14 +302,20 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
     int gridSize = (n + TILE_WIDTH - 1) / TILE_WIDTH;
 
     // Allocate device memory
-    data_t *Ad, *bd, *xd, *rd, *pd, *Apd, *temp_result;
+    data_t *Ad, *bd, *xd, *rd, *pd, *Apd;
+    data_t *alpha_d, *beta_d, *rsold_d, *rsnew_d;
+    int *converged_d;
     CUDA_SAFE_CALL(cudaMalloc((void**)&Ad, n * n * sizeof(data_t)));
     CUDA_SAFE_CALL(cudaMalloc((void**)&bd, n * sizeof(data_t)));
     CUDA_SAFE_CALL(cudaMalloc((void**)&xd, n * sizeof(data_t)));
     CUDA_SAFE_CALL(cudaMalloc((void**)&rd, n * sizeof(data_t)));
     CUDA_SAFE_CALL(cudaMalloc((void**)&pd, n * sizeof(data_t)));
     CUDA_SAFE_CALL(cudaMalloc((void**)&Apd, n * sizeof(data_t)));
-    CUDA_SAFE_CALL(cudaMalloc((void**)&temp_result, sizeof(data_t)));
+    CUDA_SAFE_CALL(cudaMalloc((void**)&alpha_d, sizeof(data_t)));
+    CUDA_SAFE_CALL(cudaMalloc((void**)&beta_d, sizeof(data_t)));
+    CUDA_SAFE_CALL(cudaMalloc((void**)&rsold_d, sizeof(data_t)));
+    CUDA_SAFE_CALL(cudaMalloc((void**)&rsnew_d, sizeof(data_t)));
+    CUDA_SAFE_CALL(cudaMalloc((void**)&converged_d, sizeof(int)));
 
     // Record start event (end-to-end)
     cudaEventRecord(start);
@@ -319,63 +328,46 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
     // Initial r = b - Ax (assuming initial x is zeros)
     // r = b
     vec_copy_kernel<<<gridSize, blockSize>>>(n, bd, rd);
-    CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // p = r (initial search direction)
     vec_copy_kernel<<<gridSize, blockSize>>>(n, rd, pd);
-    CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // rsold = r · r
-    CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-    launch_dot(kc.type, gridSize, blockSize, n, rd, rd, temp_result);
-    CUDA_SAFE_CALL(cudaDeviceSynchronize());
-    
-    data_t rsold;
-    CUDA_SAFE_CALL(cudaMemcpy(&rsold, temp_result, sizeof(data_t), cudaMemcpyDeviceToHost));
+    CUDA_SAFE_CALL(cudaMemset(rsold_d, 0, sizeof(data_t)));
+    launch_dot(kc.type, gridSize, blockSize, n, rd, rd, rsold_d);
     
     // CG iterations
     for (int iter = 0; iter < MAX_ITERS; iter++) {
         // Compute Ap = A * p
         launch_matvec(kc.type, gridSize, blockSize, n, Ad, pd, Apd);
-        CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
-        // alpha = rsold / (p · Ap)
-        CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-        launch_dot(kc.type, gridSize, blockSize, n, pd, Apd, temp_result);
-        CUDA_SAFE_CALL(cudaDeviceSynchronize());
-        
-        data_t pAp;
-        CUDA_SAFE_CALL(cudaMemcpy(&pAp, temp_result, sizeof(data_t), cudaMemcpyDeviceToHost));
-        
-        data_t alpha = rsold / pAp;
+        // alpha = rsold / (p · Ap) (stored in rsnew_d temporarily)
+        CUDA_SAFE_CALL(cudaMemset(rsnew_d, 0, sizeof(data_t)));
+        launch_dot(kc.type, gridSize, blockSize, n, pd, Apd, rsnew_d);
+                
+        compute_alpha<<<1, 1>>>(rsold_d, rsnew_d, alpha_d);
         
         // x = x + alpha * p
-        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, alpha, pd, xd, xd);
-        CUDA_SAFE_CALL(cudaDeviceSynchronize());
+        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, alpha_d, pd, xd, xd);
         
         // r = r - alpha * Ap
-        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, -alpha, Apd, rd, rd);
-        CUDA_SAFE_CALL(cudaDeviceSynchronize());
+        vec_mul_sub_kernel<<<gridSize, blockSize>>>(n, alpha_d, Apd, rd, rd);
         
         // rsnew = r · r
-        CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-        launch_dot(kc.type, gridSize, blockSize, n, rd, rd, temp_result);
-        CUDA_SAFE_CALL(cudaDeviceSynchronize());
-        
-        data_t rsnew;
-        CUDA_SAFE_CALL(cudaMemcpy(&rsnew, temp_result, sizeof(data_t), cudaMemcpyDeviceToHost));
+        CUDA_SAFE_CALL(cudaMemset(rsnew_d, 0, sizeof(data_t)));
+        launch_dot(kc.type, gridSize, blockSize, n, rd, rd, rsnew_d);
         
         // Check convergence
-        if (sqrt(rsnew) < TOL) break;
+        convergence_kernel<<<1, 1>>>(rsnew_d, converged_d);
+        int converged_h;
+        CUDA_SAFE_CALL(cudaMemcpy(&converged_h, converged_d, sizeof(int), cudaMemcpyDeviceToHost));
+        if (converged_h) break;
         
-        // beta = rsnew / rsold
-        data_t beta = rsnew / rsold;
+        // beta = rsnew / rsold (also rsold = rsnew for next iteration)
+        compute_beta<<<1, 1>>>(rsnew_d, rsold_d, beta_d);
         
         // p = r + beta * p
-        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, beta, pd, rd, pd);
-        CUDA_SAFE_CALL(cudaDeviceSynchronize());
-        
-        rsold = rsnew;
+        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, beta_d, pd, rd, pd);
     }
 
     // Copy result back to host
