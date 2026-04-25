@@ -78,6 +78,19 @@ __global__ void vec_copy_kernel(int n, data_t* x, data_t* y)
     if (i < n) y[i] = x[i];
 }
 
+/* ================= VECTOR MULTIPLY AND ADD GPU KERNEL ================= */
+// Vector multiply and add: z = a * x + y
+
+// Global memory only (best version since memory-bound and coalesced)
+// Shared memory introduces unnecessary overhead
+__global__ void vec_mul_add_kernel(int n, data_t a, data_t* x, data_t* y, data_t* z)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        z[i] = a * x[i] + y[i];
+    }
+}
+
 /* ================= DOT PRODUCT GPU KERNELS ================= */
 // Dot product: result = <a, b>
 
@@ -200,35 +213,6 @@ __global__ void mat_vec_mul_reduce(int n, data_t* A, data_t* x, data_t* result)
     result[i] = sum;
 }
 
-/* ================= VECTOR MULTIPLY AND ADD GPU KERNELS ================= */
-// Vector multiply and add: z = a * x + y
-
-// Naive version (global memory only)
-__global__ void vec_mul_add_naive(int n, data_t a, data_t* x, data_t* y, data_t* z)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        z[i] = a * x[i] + y[i];
-    }
-}
-
-// Optimization 1: Naive shared memory
-__global__ void vec_mul_add_shared(int n, data_t a, data_t* x, data_t* y, data_t* z)
-{
-    __shared__ data_t sX[TILE_WIDTH];
-    __shared__ data_t sY[TILE_WIDTH];
-
-    int tid = threadIdx.x;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (i < n) {
-        sX[tid] = x[i];
-        sY[tid] = y[i];
-        __syncthreads();
-        z[i] = a * sX[tid] + sY[tid];
-    }
-}
-
 /* ================= CPU Reference ================= */
 
 // Helper to compute dot product of two vectors
@@ -300,14 +284,6 @@ void launch_matvec(KernelType kt, int grid, int block, int n, data_t* A, data_t*
     }
 }
 
-void launch_vecadd(KernelType kt, int grid, int block, int n, data_t a, data_t* x, data_t* y, data_t* z) {
-    switch (kt) {
-        case NAIVE_GLOBAL: vec_mul_add_naive<<<grid, block>>>(n, a, x, y, z); break;
-        case NAIVE_SHARED: vec_mul_add_shared<<<grid, block>>>(n, a, x, y, z); break;
-        case REDUCE_SHARED: vec_mul_add_shared<<<grid, block>>>(n, a, x, y, z); break;
-    }
-}
-
 /* ================= CG GPU WRAPPER ================= */
 
 // Conjugate gradient GPU wrapper function
@@ -374,11 +350,11 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
         data_t alpha = rsold / pAp;
         
         // x = x + alpha * p
-        launch_vecadd(kc.type, gridSize, blockSize, n, alpha, pd, xd, xd);
+        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, alpha, pd, xd, xd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // r = r - alpha * Ap
-        launch_vecadd(kc.type, gridSize, blockSize, n, -alpha, Apd, rd, rd);
+        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, -alpha, Apd, rd, rd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // rsnew = r · r
@@ -396,7 +372,7 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
         data_t beta = rsnew / rsold;
         
         // p = r + beta * p
-        launch_vecadd(kc.type, gridSize, blockSize, n, beta, pd, rd, pd);
+        vec_mul_add_kernel<<<gridSize, blockSize>>>(n, beta, pd, rd, pd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         rsold = rsnew;
