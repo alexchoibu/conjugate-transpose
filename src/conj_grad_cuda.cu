@@ -464,27 +464,9 @@ int main()
         double timestamp = interval(time_start, time_stop);
         printf("CPU time: %f ms\n", timestamp * 1000.0);
 
-        // Define GPU kernels
-        KernelSet kernels[] = {
-            {
-                "Naive Global", 
-                dot_product_naive,
-                vec_copy_naive,
-                mat_vec_mul_naive,
-                vec_mul_add_naive
-            },
-            {
-                "Naive Shared", 
-                dot_product_shared,
-                vec_copy_shared,
-                mat_vec_mul_shared,
-                vec_mul_add_shared
-            }
-        };
-
-        int num_configs = sizeof(kernels) / sizeof(KernelSet);
-        for (int k = 0; k < num_configs; k++) {
-            printf("\n--- %s ---\n", kernels[k].name);
+        for (int kt = NAIVE_GLOBAL; kt <= NAIVE_SHARED; kt++) {
+            KernelType ktype = static_cast<KernelType>(kt);
+            printf("\n--- GPU Config: %d ---\n", kt);
 
             // Reset initial guess for GPU
             for (int i = 0; i < width; i++) {
@@ -492,7 +474,7 @@ int main()
             }
 
             // GPU computation
-            conj_grad_gpu(width, h_A, h_b, h_x, kernels[k]);
+            conj_grad_gpu(width, h_A, h_b, h_x, ktype);
 
             // Verify correctness
             data_t max_err = 0.0;
