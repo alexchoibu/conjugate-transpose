@@ -345,7 +345,7 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
         CUDA_SAFE_CALL(cudaMemset(rsnew_d, 0, sizeof(data_t)));
         launch_dot(kc.type, gridSize, blockSize, n, pd, Apd, rsnew_d);
                 
-        compute_alpha<<<1, 1>>>(rsold_d, rsnew_d, alpha_d);
+        alpha_kernel<<<1, 1>>>(rsold_d, rsnew_d, alpha_d);
         
         // x = x + alpha * p
         vec_mul_add_kernel<<<gridSize, blockSize>>>(n, alpha_d, pd, xd, xd);
@@ -364,7 +364,7 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
         if (converged_h) break;
         
         // beta = rsnew / rsold (also rsold = rsnew for next iteration)
-        compute_beta<<<1, 1>>>(rsnew_d, rsold_d, beta_d);
+        beta_kernel<<<1, 1>>>(rsnew_d, rsold_d, beta_d);
         
         // p = r + beta * p
         vec_mul_add_kernel<<<gridSize, blockSize>>>(n, beta_d, pd, rd, pd);
@@ -389,7 +389,11 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
     CUDA_SAFE_CALL(cudaFree(rd));
     CUDA_SAFE_CALL(cudaFree(pd));
     CUDA_SAFE_CALL(cudaFree(Apd));
-    CUDA_SAFE_CALL(cudaFree(temp_result));
+    CUDA_SAFE_CALL(cudaFree(alpha_d));
+    CUDA_SAFE_CALL(cudaFree(beta_d));
+    CUDA_SAFE_CALL(cudaFree(rsold_d));
+    CUDA_SAFE_CALL(cudaFree(rsnew_d));
+    CUDA_SAFE_CALL(cudaFree(converged_d));
 }
 
 /* ================= MAIN ================= */
