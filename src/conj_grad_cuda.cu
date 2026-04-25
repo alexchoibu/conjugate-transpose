@@ -338,16 +338,16 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
     
     // Initial r = b - Ax (assuming initial x is zeros)
     // r = b
-    launch_copy(kc.kt, gridSize, blockSize, n, bd, rd);
+    launch_copy(kc.type, gridSize, blockSize, n, bd, rd);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // p = r (initial search direction)
-    launch_copy(kc.kt, gridSize, blockSize, n, rd, pd);
+    launch_copy(kc.type, gridSize, blockSize, n, rd, pd);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     // rsold = r · r
     CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-    launch_dot(kc.kt, gridSize, blockSize, n, rd, rd, temp_result);
+    launch_dot(kc.type, gridSize, blockSize, n, rd, rd, temp_result);
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
     
     data_t rsold;
@@ -356,12 +356,12 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
     // CG iterations
     for (int iter = 0; iter < MAX_ITERS; iter++) {
         // Compute Ap = A * p
-        launch_matvec(kc.kt, gridSize, blockSize, n, Ad, pd, Apd);
+        launch_matvec(kc.type, gridSize, blockSize, n, Ad, pd, Apd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // alpha = rsold / (p · Ap)
         CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-        launch_dot(kc.kt, gridSize, blockSize, n, pd, Apd, temp_result);
+        launch_dot(kc.type, gridSize, blockSize, n, pd, Apd, temp_result);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         data_t pAp;
@@ -370,16 +370,16 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
         data_t alpha = rsold / pAp;
         
         // x = x + alpha * p
-        launch_vecadd(kc.kt, gridSize, blockSize, n, alpha, pd, xd, xd);
+        launch_vecadd(kc.type, gridSize, blockSize, n, alpha, pd, xd, xd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // r = r - alpha * Ap
-        launch_vecadd(kc.kt, gridSize, blockSize, n, -alpha, Apd, rd, rd);
+        launch_vecadd(kc.type, gridSize, blockSize, n, -alpha, Apd, rd, rd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         // rsnew = r · r
         CUDA_SAFE_CALL(cudaMemset(temp_result, 0, sizeof(data_t)));
-        launch_dot(kc.kt, gridSize, blockSize, n, rd, rd, temp_result);
+        launch_dot(kc.type, gridSize, blockSize, n, rd, rd, temp_result);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         data_t rsnew;
@@ -392,7 +392,7 @@ void conj_grad_gpu(int n, data_t *h_A, data_t *h_b, data_t *h_x, KernelConfig kc
         data_t beta = rsnew / rsold;
         
         // p = r + beta * p
-        launch_vecadd(kc.kt, gridSize, blockSize, n, beta, pd, rd, pd);
+        launch_vecadd(kc.type, gridSize, blockSize, n, beta, pd, rd, pd);
         CUDA_SAFE_CALL(cudaDeviceSynchronize());
         
         rsold = rsnew;
