@@ -27,7 +27,8 @@ typedef double data_t;
 
 enum KernelType {
     NAIVE_GLOBAL,
-    NAIVE_SHARED
+    NAIVE_SHARED,
+    REDUCE_SHARED
 };
 
 struct KernelConfig {
@@ -37,7 +38,8 @@ struct KernelConfig {
 
 KernelConfig configs[] = {
     {"Naive Global", NAIVE_GLOBAL},
-    {"Naive Shared", NAIVE_SHARED}
+    {"Naive Shared", NAIVE_SHARED},
+    {"Reduce Shared", REDUCE_SHARED}
 };
 
 const int NUM_CONFIGS = sizeof(configs) / sizeof(configs[0]);
@@ -65,6 +67,17 @@ double interval(struct timespec start, struct timespec end)
   return (((double)temp.tv_sec) + ((double)temp.tv_nsec)*1.0e-9);
 }
 
+/* ================= VECTOR COPY GPU KERNEL ================= */
+// Vector copy: y = x
+
+// Global memory only (best version since memory-bound and coalesced)
+// Shared memory introduces unnecessary overhead
+__global__ void vec_copy_kernel(int n, data_t* x, data_t* y)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = x[i];
+}
+
 /* ================= DOT PRODUCT GPU KERNELS ================= */
 // Dot product: result = <a, b>
 
@@ -72,9 +85,7 @@ double interval(struct timespec start, struct timespec end)
 __global__ void dot_product_naive(int n, data_t* a, data_t* b, data_t* result)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        atomicAdd(result, a[i] * b[i]);
-    }
+    if (i < n) atomicAdd(result, a[i] * b[i]);
 }
 
 // Optimization 1: Naive shared memory
@@ -85,36 +96,46 @@ __global__ void dot_product_shared(int n, data_t* a, data_t* b, data_t* result)
     int tid = threadIdx.x;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (i < n) {
-        sData[tid] = a[i] * b[i];
-    } else {
-        sData[tid] = 0.0;
-    }
+    sData[tid] = (i < n) ? a[i] * b[i] : 0.0;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sData[tid] += sData[tid + s];
-        }
+        if (tid < s) sData[tid] += sData[tid + s];
         __syncthreads();
     }
 
-    if (tid == 0) {
-        atomicAdd(result, sData[0]);
-    }
+    if (tid == 0) atomicAdd(result, sData[0]);
 }
 
-/* ================= VECTOR COPY GPU KERNEL ================= */
-// Vector copy: y = x
-
-// Global memory only (best version since memory-bound and coalesced)
-// Shared memory introduces unnecessary overhead
-__global__ void vec_copy_kernel(int n, data_t* x, data_t* y)
+// Optimization 2: Warp level reduction
+__global__ void dot_product_reduce(int n, data_t* a, data_t* b, data_t* result)
 {
+    __shared__ data_t sData[TILE_WIDTH];
+
+    int tid = threadIdx.x;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        y[i] = x[i];
+
+    sData[tid] = (i < n) ? a[i] * b[i] : 0.0;
+    __syncthreads();
+
+    // Reduce within block
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (tid < s) sData[tid] += sData[tid + s];
+        __syncthreads();
     }
+
+    // Warp level reduction (no synchronization needed)
+    if (tid < 32) {
+        volatile data_t* smem = sData;
+        smem[tid] += smem[tid + 32];
+        smem[tid] += smem[tid + 16];
+        smem[tid] += smem[tid + 8];
+        smem[tid] += smem[tid + 4];
+        smem[tid] += smem[tid + 2];
+        smem[tid] += smem[tid + 1];
+    }
+
+    if (tid == 0) atomicAdd(result, sData[0]);
 }
 
 /* ================= MATRIX-VECTOR MULTIPLICATION GPU KERNELS ================= */
@@ -145,11 +166,30 @@ __global__ void mat_vec_mul_shared(int n, data_t* A, data_t* x, data_t* result)
 
     data_t sum = 0.0;
     for (int tile = 0; tile < n; tile += TILE_WIDTH) {
-        if (tid + tile < n) {
-            sX[tid] = x[tid + tile];
-        } else {
-            sX[tid] = 0.0;
+        sX[tid] = (tid + tile < n) ? x[tid + tile] : 0.0;
+        __syncthreads();
+
+        for (int j = 0; j < TILE_WIDTH && (tile + j) < n; j++) {
+            sum += A[i*n + tile + j] * sX[j];
         }
+        __syncthreads();
+    }
+    result[i] = sum;
+}
+
+// Optimization 2: Warp level reduction
+__global__ void mat_vec_mul_reduce(int n, data_t* A, data_t* x, data_t* result)
+{
+    __shared__ data_t sX[TILE_WIDTH];
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i >= n) return;
+
+    data_t sum = 0.0;
+    for (int tile = 0; tile < n; tile += TILE_WIDTH) {
+        sX[tid] = (tid + tile < n) ? x[tid + tile] : 0.0;
         __syncthreads();
 
         for (int j = 0; j < TILE_WIDTH && (tile + j) < n; j++) {
@@ -246,34 +286,25 @@ void conj_grad_cpu(int n, data_t* A, data_t* b, data_t* x) {
 /* ================= GPU KERNEL LAUNCHERS ================= */
 void launch_dot(KernelType kt, int grid, int block, int n, data_t* a, data_t* b, data_t* result) {
     switch (kt) {
-        case NAIVE_GLOBAL:
-            dot_product_naive<<<grid, block>>>(n, a, b, result);
-            break;
-        case NAIVE_SHARED:
-            dot_product_shared<<<grid, block>>>(n, a, b, result);
-            break;
+        case NAIVE_GLOBAL: dot_product_naive<<<grid, block>>>(n, a, b, result); break;
+        case NAIVE_SHARED: dot_product_shared<<<grid, block>>>(n, a, b, result); break;
+        case REDUCE_SHARED: dot_product_reduce<<<grid, block>>>(n, a, b, result); break;
     }
 }
 
 void launch_matvec(KernelType kt, int grid, int block, int n, data_t* A, data_t* x, data_t* result) {
     switch (kt) {
-        case NAIVE_GLOBAL:
-            mat_vec_mul_naive<<<grid, block>>>(n, A, x, result);
-            break;
-        case NAIVE_SHARED:
-            mat_vec_mul_shared<<<grid, block>>>(n, A, x, result);
-            break;
+        case NAIVE_GLOBAL: mat_vec_mul_naive<<<grid, block>>>(n, A, x, result); break;
+        case NAIVE_SHARED: mat_vec_mul_shared<<<grid, block>>>(n, A, x, result); break;
+        case REDUCE_SHARED: mat_vec_mul_reduce<<<grid, block>>>(n, A, x, result); break;
     }
 }
 
 void launch_vecadd(KernelType kt, int grid, int block, int n, data_t a, data_t* x, data_t* y, data_t* z) {
     switch (kt) {
-        case NAIVE_GLOBAL:
-            vec_mul_add_naive<<<grid, block>>>(n, a, x, y, z);
-            break;
-        case NAIVE_SHARED:
-            vec_mul_add_shared<<<grid, block>>>(n, a, x, y, z);
-            break;
+        case NAIVE_GLOBAL: vec_mul_add_naive<<<grid, block>>>(n, a, x, y, z); break;
+        case NAIVE_SHARED: vec_mul_add_shared<<<grid, block>>>(n, a, x, y, z); break;
+        case REDUCE_SHARED: vec_mul_add_shared<<<grid, block>>>(n, a, x, y, z); break;
     }
 }
 
