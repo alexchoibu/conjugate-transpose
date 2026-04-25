@@ -270,7 +270,7 @@ __global__ void mat_vec_mul_unroll(int n, data_t* A, data_t* x, data_t* result)
         sX[tid] = x[tid + tile];
         __syncthreads();
 
-        #pragma unroll 8
+        #pragma unroll 4
         for (int j = 0; j < TILE_WIDTH; j++) {
             sum += A[i*n + tile + j] * sX[j];
         }
