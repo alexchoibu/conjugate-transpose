@@ -5,9 +5,10 @@ NVCC := nvcc
 # Directories
 SRC_DIR := src
 EXE_DIR := exe
+INC_DIR := include
 
 # Flags
-CFLAGS := -O1 -Wall -lm
+CFLAGS := -O1 -Wall -lm -I$(INC_DIR)
 NVCCFLAGS := -arch compute_60 -code sm_60 -O1 -Xcompiler -Wall
 
 # Find all source files in src/
@@ -26,7 +27,7 @@ $(EXE_DIR):
 	mkdir -p $(EXE_DIR)
 
 # Rule for .c files
-$(EXE_DIR)/%: $(SRC_DIR)/%.c
+$(EXE_DIR)/%: $(SRC_DIR)/%.c $(INC_DIR)/*.h
 	$(CC) $(CFLAGS) $< -o $@
 
 # Rule for .cu files
