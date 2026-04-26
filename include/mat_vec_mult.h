@@ -16,6 +16,16 @@
 
 typedef float data_t;
 
+#include <xmmintrin.h>
+#include <smmintrin.h>
+#include <immintrin.h>
+
+#define VBYTES 32
+#define VSIZE (VBYTES/sizeof(data_t))
+
+typedef data_t vec_t __attribute__ ((vector_size(VBYTES)));
+
+
 struct mv_thread_data{
   int thread_id;
   int n;
@@ -29,7 +39,7 @@ struct mv_thread_data{
 void mat_vec_mul_serial(int n, matrix_ptr A, vector_ptr x, vector_ptr result);
 void mat_vec_mul_pthreads_create(int n, matrix_ptr A, vector_ptr x, vector_ptr result);
 void mat_vec_mul_openmp(int n, matrix_ptr A, vector_ptr x, vector_ptr result);
-
+void mat_vec_mul_avx_vectorize(int n, matrix_ptr A, vector_ptr x, vector_ptr result);
 
 
 
