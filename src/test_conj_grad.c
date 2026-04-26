@@ -16,6 +16,9 @@
 #include "vec_mul_add.h"
 #include "vector.h"
 
+
+
+
 #define CPNS 2.0    /* Cycles per nanosecond -- Adjust to your computer,
                        for example a 3.2 GhZ GPU, this would be 3.2 */
 
@@ -28,7 +31,7 @@
 #define NUM_TESTS 1   /* Number of different sizes to test */
 #define OPTIONS 3
 
-long int alloc_size = 512;
+long int alloc_size = 4;
 
 
 /* Prototypes */
@@ -36,6 +39,7 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp);
 void check_answers(matrix_ptr a0, vector_ptr p0, vector_ptr b0, int N);
 void conjugate_gradient_serial(int n, matrix_ptr A, vector_ptr b, vector_ptr x);
 void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr x);
+void conjugate_gradient_avx_vector(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr xd);
 void init_rand(matrix_ptr A, vector_ptr b, long int row_len);
 
 /* -=-=-=-=- Time measurement by clock_gettime() -=-=-=-=- */
@@ -248,8 +252,6 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
   int max_it = 100;
   float tolerance = 1e-10;
 
-  // print_matrix(Ad);
-  // print_vector(bd);
 
   vector_ptr rd = new_vector(n);
   zero_vector(rd, n);
@@ -285,12 +287,10 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
     // x = x + alpha * p
     vec_mul_add_pthreads_create(n, alpha, pd, xd, xd);  
    
-    // print_vector(xd);
 
     // r = r - alpha * Ap
     vec_mul_add_pthreads_create(n, -alpha, Apd, rd, rd);  
 
-    // print_vector(rd);
 
     // rsnew = r · r
     rsnew = dot_product_pthread_create(n, rd, rd);
@@ -407,6 +407,87 @@ void conjugate_gradient_openMP(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr x
 
   // print_vector(xd);
 }
+
+
+void conjugate_gradient_avx_vector(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr xd)
+{
+  int it = 0;
+  int converged = 0;
+  int max_it = 100;
+  float tolerance = 1e-10;
+
+  vector_ptr rd = new_vector(n);
+  zero_vector(rd, n);
+
+  vector_ptr pd = new_vector(n);
+  zero_vector(pd, n);
+
+  vector_ptr Apd = new_vector(n);
+  zero_vector(Apd, n);
+
+  data_t rsold, rsnew, pAp, alpha;
+
+  // Initial r = b - Ax (assuming initial x is zeros)
+  // r = b
+  vec_copy_avx_vectorize(n, bd, rd);
+
+  // p = r (initial search direction)
+  vec_copy_avx_vectorize(n, rd, pd);
+
+  // rsold = r · r
+  rsold = dot_product_avx_vectorize(n, rd, rd);
+
+ while  (it < max_it)
+  { 
+    // Compute Ap = A * p
+    mat_vec_mul_avx_vectorize(n, Ad, pd, Apd);
+
+    // alpha = rsold / (p · Ap)
+    pAp = dot_product_avx_vectorize(n, pd, Apd);
+
+    alpha = rsold / pAp;
+
+    // x = x + alpha * p
+    vec_mul_add_avx_vectorize(n, alpha, pd, xd, xd);  
+   
+    // print_vector(xd);
+
+    // r = r - alpha * Ap
+    vec_mul_add_avx_vectorize(n, -alpha, Apd, rd, rd);  
+
+    // print_vector(rd);
+
+    // rsnew = r · r
+    rsnew = dot_product_avx_vectorize(n, rd, rd);
+
+    // Check convergence
+    if (sqrt(rsnew) < tolerance)
+    {
+      converged = 1;
+      break;
+    }
+
+    // beta = rsnew / rsold
+    data_t beta = rsnew / rsold;
+
+    // p = r + beta * p
+    vec_mul_add_avx_vectorize(n, beta, pd, rd, pd);  
+
+
+    rsold = rsnew;
+
+    it++;
+  }
+
+  if (converged) {
+    printf("Converged after %d iterations\n", it);
+  } else {
+      printf("Did not converge within %d iterations\n", max_it);
+  }
+
+  print_vector(xd);
+
+}
 /*****************************************************************************/
 int main(int argc, char *argv[])
 {
@@ -429,9 +510,9 @@ int main(int argc, char *argv[])
   vector_ptr x = new_vector(alloc_size);
   zero_vector(x, alloc_size);
 
-  // conjugate_gradient_pthread(alloc_size, A, b, x);
-  // conjugate_gradient_serial(alloc_size, A, b, x);
- // conjugate_gradient_openMP(alloc_size, A, b, x);
+  conjugate_gradient_avx_vector(alloc_size, A, b, x);
+//  conjugate_gradient_pthread(alloc_size, A, b, x);
+/*
 
    OPTION = 0;
 
@@ -488,7 +569,7 @@ int main(int argc, char *argv[])
   printf("\n");
 
   printf("Wakeup delay computed: %g \n", wakeup_answer);
-
+*/
 
 } /* end main */
 

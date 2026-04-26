@@ -90,3 +90,31 @@ void mat_vec_mul_openmp(int n, matrix_ptr A, vector_ptr x, vector_ptr result)
     result_ptr[i] = (data_t) sum;
   }
 }
+
+void mat_vec_mul_avx_vectorize(int n, matrix_ptr A, vector_ptr x, vector_ptr result)
+{
+  long nLoop = n/4;
+
+  int i, j;
+
+  data_t *A_ptr = get_matrix_start(A);
+  data_t *x_ptr = get_vector_start(x);
+  data_t *result_ptr = get_vector_start(result);
+
+  for (int i = 0; i < n; i++) {
+      // Each row of A starts at A_ptr + i*n
+      // x is the same vector every iteration
+      __m128* pRow = (__m128*) &A_ptr[i * n];
+      __m128* pVec = (__m128*) x_ptr;
+
+      __m128 m0 = _mm_setzero_ps();
+
+      for (int j = 0; j < nLoop; j++) {
+          m0 = _mm_add_ps(m0, _mm_dp_ps(*pRow, *pVec, 0xF1));
+          pRow++;
+          pVec++;
+      }
+
+      result_ptr[i] = _mm_cvtss_f32(m0);
+  }
+}

@@ -15,6 +15,16 @@
 
 typedef float data_t;
 
+#include <xmmintrin.h>
+#include <smmintrin.h>
+#include <immintrin.h>
+
+#define VBYTES 32
+#define VSIZE (VBYTES/sizeof(data_t))
+
+typedef data_t vec_t __attribute__ ((vector_size(VBYTES)));
+
+
 struct d_thread_data{
   int thread_id;
   int n;
@@ -27,4 +37,5 @@ struct d_thread_data{
 float dot_serial(int n, vector_ptr a, vector_ptr b);
 float dot_product_pthread_create(int n, vector_ptr a, vector_ptr b);
 float dot_product_omp(int n, vector_ptr a, vector_ptr b);
+float dot_product_avx_vectorize(int n, vector_ptr a, vector_ptr b);
 #endif

@@ -87,3 +87,26 @@ float dot_product_omp(int n, vector_ptr a, vector_ptr b) {
     }
     return (float )sum;
 }
+
+
+float dot_product_avx_vectorize(int n, vector_ptr a, vector_ptr b)
+{
+  long nLoop = n/4;
+  __m128   m0 = _mm_setzero_ps();
+
+  data_t *a_ptr = get_vector_start(a);
+  data_t *b_ptr = get_vector_start(b);
+
+  __m128*  pSrc1 = (__m128*) a_ptr;
+  __m128*  pSrc2 = (__m128*) b_ptr;
+
+
+  for (int i = 0; i < nLoop; i++) {
+      m0 = _mm_add_ps(m0, _mm_dp_ps(*pSrc1, *pSrc2, 0xF1)); 
+
+      pSrc1++;
+      pSrc2++;
+  }
+  return _mm_cvtss_f32(m0);  
+
+}
