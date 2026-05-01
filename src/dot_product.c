@@ -91,22 +91,22 @@ float dot_product_omp(int n, vector_ptr a, vector_ptr b) {
 
 float dot_product_avx_vectorize(int n, vector_ptr a, vector_ptr b)
 {
-  long nLoop = n/4;
-  __m128   m0 = _mm_setzero_ps();
+  long nLoop = n/8;
+  __m256   m0 = _mm256_setzero_ps();
 
   data_t *a_ptr = get_vector_start(a);
   data_t *b_ptr = get_vector_start(b);
 
-  __m128*  pSrc1 = (__m128*) a_ptr;
-  __m128*  pSrc2 = (__m128*) b_ptr;
-
 
   for (int i = 0; i < nLoop; i++) {
-      m0 = _mm_add_ps(m0, _mm_dp_ps(*pSrc1, *pSrc2, 0xF1)); 
-
-      pSrc1++;
-      pSrc2++;
+      __m256 va = _mm256_loadu_ps(a_ptr + i*8);
+      __m256 vb = _mm256_loadu_ps(b_ptr + i*8);
+      __m256 prod = _mm256_mul_ps(va, vb);
+      m0 = _mm256_add_ps(m0, prod);
   }
-  return _mm_cvtss_f32(m0);  
+  float buf[8];
+  _mm256_storeu_ps(buf, m0);
+  return buf[0] + buf[1] + buf[2] + buf[3]
+        + buf[4] + buf[5] + buf[6] + buf[7];  
 
 }

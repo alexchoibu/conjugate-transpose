@@ -28,10 +28,10 @@
 // #define B   40  /* coefficient of x */
 // #define C   916  /* constant term */
 
-#define NUM_TESTS 1   /* Number of different sizes to test */
-#define OPTIONS 3
+#define NUM_TESTS 6   /* Number of different sizes to test */
+#define OPTIONS 4
 
-long int alloc_size = 4;
+
 
 
 /* Prototypes */
@@ -216,15 +216,15 @@ void conjugate_gradient_serial(int n, matrix_ptr A, vector_ptr b, vector_ptr x)
   }
 
   
-  if (converged) {
-    printf("Converged after %d iterations\n", it);
-  } else {
-      printf("Did not converge within %d iterations\n", max_it);
-  }
+  // if (converged) {
+  //   printf("Converged after %d iterations\n", it);
+  // } else {
+  //     printf("Did not converge within %d iterations\n", max_it);
+  // }
 
   // printf("CG solution: [%.10f, %.10f, %.10f, %.10f]\n", p[0], p[1], p[2], p[3]);
   // printf("CG Solution: \n");
-  // print_vector(x);
+//  print_vector(x);
 }
 
 
@@ -252,7 +252,6 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
   int max_it = 100;
   float tolerance = 1e-10;
 
-
   vector_ptr rd = new_vector(n);
   zero_vector(rd, n);
 
@@ -273,7 +272,7 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
 
   // rsold = r · r
   rsold = dot_product_pthread_create(n, rd, rd);
-
+ 
   while  (it < max_it)
   { 
     // Compute Ap = A * p
@@ -321,7 +320,7 @@ void conjugate_gradient_pthread(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr 
       printf("Did not converge within %d iterations\n", max_it);
   }
 
-  // print_vector(xd);
+ // print_vector(xd);
 
 }
 
@@ -370,7 +369,6 @@ void conjugate_gradient_openMP(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr x
     // x = x + alpha * p
     vec_mul_add_openmp(n, alpha, pd, xd, xd);  
    
-    // print_vector(xd);
 
     // r = r - alpha * Ap
     vec_mul_add_openmp(n, -alpha, Apd, rd, rd);  
@@ -399,13 +397,13 @@ void conjugate_gradient_openMP(int n, matrix_ptr Ad, vector_ptr bd, vector_ptr x
     it++;
   }
 
-  if (converged) {
-    printf("Converged after %d iterations\n", it);
-  } else {
-      printf("Did not converge within %d iterations\n", max_it);
-  }
+  // if (converged) {
+  //   printf("Converged after %d iterations\n", it);
+  // } else {
+  //     printf("Did not converge within %d iterations\n", max_it);
+  // }
 
-  // print_vector(xd);
+//  print_vector(xd);
 }
 
 
@@ -430,12 +428,14 @@ void conjugate_gradient_avx_vector(int n, matrix_ptr Ad, vector_ptr bd, vector_p
   // Initial r = b - Ax (assuming initial x is zeros)
   // r = b
   vec_copy_avx_vectorize(n, bd, rd);
-
+  
+ 
   // p = r (initial search direction)
   vec_copy_avx_vectorize(n, rd, pd);
 
   // rsold = r · r
   rsold = dot_product_avx_vectorize(n, rd, rd);
+  // printf("rsold is %f\n", rsold);
 
  while  (it < max_it)
   { 
@@ -479,13 +479,13 @@ void conjugate_gradient_avx_vector(int n, matrix_ptr Ad, vector_ptr bd, vector_p
     it++;
   }
 
-  if (converged) {
-    printf("Converged after %d iterations\n", it);
-  } else {
-      printf("Did not converge within %d iterations\n", max_it);
-  }
+  // if (converged) {
+  //   printf("Converged after %d iterations\n", it);
+  // } else {
+  //     printf("Did not converge within %d iterations\n", max_it);
+  // }
 
-  print_vector(xd);
+//  print_vector(xd);
 
 }
 /*****************************************************************************/
@@ -499,77 +499,100 @@ int main(int argc, char *argv[])
   omp_set_num_threads(4);
   int z;
   z = NUM_TESTS-1;
-  
+  // long int alloc_size = 4;
   wakeup_answer = wakeup_delay();
+  int sizes[] = {256, 512, 1024, 2048, 4096, 8192};
+  // int sizes[] = {16};
+  int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
 
+  for (int s = 0; s < num_sizes; s++)
+  {
+    int alloc_size = sizes[s];
+    matrix_ptr A = new_matrix(alloc_size);
+    vector_ptr b = new_vector(alloc_size);
+    init_rand(A, b, alloc_size);
 
-  matrix_ptr A = new_matrix(alloc_size);
-  vector_ptr b = new_vector(alloc_size);
-  init_rand(A, b, alloc_size);
+    vector_ptr x = new_vector(alloc_size);
+    zero_vector(x, alloc_size);
 
-  vector_ptr x = new_vector(alloc_size);
-  zero_vector(x, alloc_size);
+    
+    OPTION = 0;
 
-  conjugate_gradient_avx_vector(alloc_size, A, b, x);
-//  conjugate_gradient_pthread(alloc_size, A, b, x);
-/*
+    // conjugate_gradient_avx_vector(alloc_size, A, b, x);
+   
 
-   OPTION = 0;
-
-  // for (x=0; x<NUM_TESTS && (n = A*x*x + B*x + C, n<=alloc_size); x++) {
-    // printf(" OPT %d, iter %ld, size %ld\n", OPTION, x, n);
     printf("Testing Conjugate Gradient Serial, size %d\n", alloc_size);
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
     conjugate_gradient_serial(alloc_size, A, b, x);
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
-    time_stamp[OPTION][z] = interval(time_start, time_stop);
-  // }
-  printf("\n");
-  zero_vector(x, alloc_size);
-  OPTION++;
-  // for (x=0; x<NUM_TESTS && (n = A*x*x + B*x + C, n<=alloc_size); x++) {
-  //   printf(" OPT %d, iter %ld, size %ld\n", OPTION, x, n);
-    printf("Testing Conjugate Gradient Pthread, size %d\n", alloc_size);
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
-    conjugate_gradient_pthread(alloc_size, A, b, x);
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
-    time_stamp[OPTION][z] = interval(time_start, time_stop);
-  // }
+    time_stamp[OPTION][s] = interval(time_start, time_stop);
 
-  printf("\n");
-  zero_vector(x, alloc_size);
-  OPTION++;
-  if (OPTIONS > 2) {
-    // for (x=0; x<NUM_TESTS && (n = A*x*x + B*x + C, n<=alloc_size); x++) {
-    //   printf(" OPT %d, iter %ld, size %ld\n", OPTION, x, n);
-      printf("Testing Conjugate Gradient OpenMP, size %d\n", alloc_size);
+    printf("\n");
+  
+    zero_vector(x, alloc_size);
+    OPTION++;
+  
+      printf("Testing Conjugate Gradient Pthread, size %d\n", alloc_size);
       clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
-      conjugate_gradient_openMP(alloc_size, A, b, x);
+      conjugate_gradient_pthread(alloc_size, A, b, x);
       clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
-      time_stamp[OPTION][z] = interval(time_start, time_stop);
-    // }
+      time_stamp[OPTION][s] = interval(time_start, time_stop);
+  
+
+    printf("\n");
+    zero_vector(x, alloc_size);
+
+    OPTION++;
+    if (OPTIONS > 2) {
+    
+        printf("Testing Conjugate Gradient OpenMP, size %d\n", alloc_size);
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
+        conjugate_gradient_openMP(alloc_size, A, b, x);
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
+        time_stamp[OPTION][s] = interval(time_start, time_stop);
+
+    }
+
+    printf("\n");
+    zero_vector(x, alloc_size);
+    OPTION++;
+    if (OPTIONS > 2) {
+      
+        printf("Testing Conjugate Gradient AVX, size %d\n", alloc_size);
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_start);
+        conjugate_gradient_avx_vector(alloc_size, A, b, x);
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &time_stop);
+        time_stamp[OPTION][s] = interval(time_start, time_stop);
+
+    }
+
+    free(A->data);
+    free(A);
+    free(b->data);
+    free(b);
+    free(x->data);
+    free(x);
+   
   }
+
+  
+
+
 
   printf("Done collecting measurements.\n\n");
 
-  printf("row_len, Serial, Pthread, OpenMP\n");
-  {
-    int i, j;
-    for (i = 0; i < NUM_TESTS; i++) {
-      printf("%d, ", alloc_size);
-      for (j = 0; j < OPTIONS; j++) {
-        if (j != 0) {
-          printf(", ");
-        }
-        printf("%ld", (long int) ((double)(CPNS) * 1.0e9 * time_stamp[j][i]));
-      }
-      printf("\n");
+  printf("row_len, Serial, Pthread, OpenMP, AVX\n");
+  for (int s = 0; s < num_sizes; s++) {
+    printf("%d", sizes[s]);
+    for (int j = 0; j < OPTIONS; j++) {
+        printf(", %ld", (long int)((double)(CPNS) * 1.0e9 * time_stamp[j][s]));
     }
+    printf("\n");
   }
   printf("\n");
 
   printf("Wakeup delay computed: %g \n", wakeup_answer);
-*/
+
 
 } /* end main */
 

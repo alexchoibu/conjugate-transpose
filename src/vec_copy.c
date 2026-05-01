@@ -67,8 +67,6 @@ void vec_copy_omp(int n, vector_ptr x, vector_ptr y)
 
 #pragma omp parallel for
   for (int i = 0; i < n; i++) {
-    // int tid = omp_get_thread_num();
-    // printf("Thread %d handling i=%d\n", tid, i);
     y_ptr[i] = x_ptr[i];
   }
   
@@ -82,20 +80,12 @@ void vec_copy_avx_vectorize(int n, vector_ptr x, vector_ptr y)
   data_t *x_ptr = get_vector_start(x);
   data_t *y_ptr = get_vector_start(y);
 
-  long nLoop = n/4;
+  long nLoop = n/8;
 
-  __m128*  pSrc = (__m128*) x_ptr;
-  __m128*  pDest = (__m128*) y_ptr;
 
   for (int i = 0; i < nLoop; i++) {
-    *pDest = *pSrc;
-    /*
-    float buf[4];
-    _mm_storeu_ps(buf, *pDest);
-    printf("Iter %d: copied [%f, %f, %f, %f]\n",
-            i, buf[0], buf[1], buf[2], buf[3]);
-    */
-    pSrc++;
-    pDest++;
+    __m256 v = _mm256_loadu_ps(x_ptr + i*8);
+    _mm256_storeu_ps(y_ptr + i*8, v);
+  
   }
 }

@@ -74,7 +74,7 @@ void vec_mul_add_openmp(int n, data_t c, vector_ptr x, vector_ptr y, vector_ptr 
 
 void vec_mul_add_avx_vectorize(int n, data_t c, vector_ptr x, vector_ptr y, vector_ptr result)
 {
-  long nLoop = n/4;
+  long nLoop = n/8;
 
   int i, j;
 
@@ -82,19 +82,17 @@ void vec_mul_add_avx_vectorize(int n, data_t c, vector_ptr x, vector_ptr y, vect
   data_t *y_ptr = get_vector_start(y);
   data_t *result_ptr = get_vector_start(result);
 
-   __m128 vc = _mm_set1_ps(c);
+   __m256 vc = _mm256_set1_ps(c);
 
-    __m128* pX   = (__m128*) x_ptr;
-    __m128* pY   = (__m128*) y_ptr;
-    __m128* pRes = (__m128*) result_ptr;
+   
 
     for (long i = 0; i < nLoop; i++) {
-        __m128 prod = _mm_mul_ps(vc, *pX);      // c * x[i..i+3]
-        *pRes      = _mm_add_ps(prod, *pY);     // + y[i..i+3]
-
-        pX++;
-        pY++;
-        pRes++;
+   
+      __m256 vx   = _mm256_loadu_ps(x_ptr + i*8);
+      __m256 vy   = _mm256_loadu_ps(y_ptr + i*8);
+      __m256 prod = _mm256_mul_ps(vc, vx);
+      __m256 res  = _mm256_add_ps(prod, vy);
+      _mm256_storeu_ps(result_ptr + i*8, res);
     }
 
 }

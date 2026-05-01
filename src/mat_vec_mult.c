@@ -93,7 +93,7 @@ void mat_vec_mul_openmp(int n, matrix_ptr A, vector_ptr x, vector_ptr result)
 
 void mat_vec_mul_avx_vectorize(int n, matrix_ptr A, vector_ptr x, vector_ptr result)
 {
-  long nLoop = n/4;
+  long nLoop = n/8;
 
   int i, j;
 
@@ -102,19 +102,21 @@ void mat_vec_mul_avx_vectorize(int n, matrix_ptr A, vector_ptr x, vector_ptr res
   data_t *result_ptr = get_vector_start(result);
 
   for (int i = 0; i < n; i++) {
-      // Each row of A starts at A_ptr + i*n
-      // x is the same vector every iteration
-      __m128* pRow = (__m128*) &A_ptr[i * n];
-      __m128* pVec = (__m128*) x_ptr;
 
-      __m128 m0 = _mm_setzero_ps();
+      data_t *row_ptr = &A_ptr[i * n];
+      __m256 m0 = _mm256_setzero_ps();
 
       for (int j = 0; j < nLoop; j++) {
-          m0 = _mm_add_ps(m0, _mm_dp_ps(*pRow, *pVec, 0xF1));
-          pRow++;
-          pVec++;
+          __m256 va = _mm256_loadu_ps(row_ptr + j*8);
+          __m256 vb = _mm256_loadu_ps(x_ptr   + j*8);
+          __m256 prod = _mm256_mul_ps(va, vb);
+          m0 = _mm256_add_ps(m0, prod);
       }
 
-      result_ptr[i] = _mm_cvtss_f32(m0);
+      float buf[8];
+      _mm256_storeu_ps(buf, m0);
+      result_ptr[i] = buf[0] + buf[1] + buf[2] + buf[3]
+                    + buf[4] + buf[5] + buf[6] + buf[7];
+
   }
 }
